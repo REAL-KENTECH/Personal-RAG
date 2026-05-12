@@ -148,10 +148,47 @@ st.markdown(
 
 DATA_DIR = Path(__file__).parent / '.data'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-SESSIONS_DIR = DATA_DIR / 'sessions'
-SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR = Path(__file__).parent / 'logs'
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ---------- Multi-user isolation ----------
+# Each user gets their own subtree under DATA_DIR and LOGS_DIR so uploaded
+# documents, indexes, conversation history, and agent runs do not leak between
+# users sharing this deployment. If no users are configured in secrets, the
+# app falls back to a single '_local' user (suitable for local dev).
+
+USERS_FROM_SECRETS = {}
+try:
+    USERS_FROM_SECRETS = dict(st.secrets.get('users', {}) or {})
+except Exception:
+    USERS_FROM_SECRETS = {}
+
+
+def _safe_uid(uid: str) -> str:
+    return re.sub(r'[^A-Za-z0-9._-]+', '_', uid or '_local') or '_local'
+
+
+def _user_data_dir() -> Path:
+    d = DATA_DIR / _safe_uid(st.session_state.get('user_id', '_local'))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _user_sessions_dir() -> Path:
+    d = _user_data_dir() / 'sessions'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _user_logs_dir() -> Path:
+    d = LOGS_DIR / _safe_uid(st.session_state.get('user_id', '_local'))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _agent_log_path() -> Path:
+    return _user_logs_dir() / 'agents.jsonl'
 
 EMBEDDER_CHOICES = [
     'BAAI/bge-m3',
@@ -357,6 +394,58 @@ def _init_state():
 _init_state()
 
 
+# ---------- Login gate ----------
+
+def _render_login_screen():
+    """Render brand + login form. Sets user_id on success and reruns; otherwise
+    st.stop()s so the rest of the app is gated off."""
+    if _LOGO_URI:
+        st.markdown(
+            f'<div style="text-align:center; margin-top:80px; margin-bottom:8px;">'
+            f'<img src="{_LOGO_URI}" '
+            f'style="max-width:240px; height:auto; opacity:0.95;" /></div>',
+            unsafe_allow_html=True,
+        )
+    st.markdown(
+        '<div style="text-align:center; font-size:14px; color:rgba(128,128,128,0.9); '
+        'margin-bottom:24px;">로그인이 필요합니다.</div>',
+        unsafe_allow_html=True,
+    )
+    _, form_col, _ = st.columns([1, 2, 1])
+    with form_col:
+        with st.form('_login_form', clear_on_submit=False):
+            username = st.text_input('사용자 ID')
+            password = st.text_input('비밀번호', type='password')
+            submitted = st.form_submit_button(
+                '로그인', use_container_width=True, type='primary'
+            )
+        if submitted:
+            if (username in USERS_FROM_SECRETS
+                    and str(USERS_FROM_SECRETS[username]) == str(password)):
+                st.session_state['user_id'] = username
+                st.session_state['_loaded_for_embedder'] = None
+                st.rerun()
+            else:
+                st.error('사용자 ID 또는 비밀번호가 올바르지 않습니다.')
+    st.stop()
+
+
+def _auth_gate():
+    """Resolve the active user_id:
+      - users configured in st.secrets['users'] → render login form, set user_id
+        to the verified username.
+      - no users configured → single-tenant '_local'. Local dev only."""
+    if 'user_id' in st.session_state and st.session_state['user_id']:
+        return
+    if not USERS_FROM_SECRETS:
+        st.session_state['user_id'] = '_local'
+        return
+    _render_login_screen()
+
+
+_auth_gate()
+
+
 # =============================================================================
 # Persistent vector store
 # =============================================================================
@@ -366,7 +455,7 @@ def _safe_name(s: str) -> str:
 
 
 def _embedder_dir(embedder_id: str) -> Path:
-    return DATA_DIR / _safe_name(embedder_id)
+    return _user_data_dir() / _safe_name(embedder_id)
 
 
 def compute_doc_id(name: str, raw_text: str, chunk_size: int, chunk_overlap: int) -> str:
@@ -434,7 +523,7 @@ def _new_session_id() -> str:
 
 
 def _session_path(sid: str) -> Path:
-    return SESSIONS_DIR / f'{sid}.json'
+    return _user_sessions_dir() / f'{sid}.json'
 
 
 def save_current_session():
@@ -485,10 +574,11 @@ def load_session(sid: str) -> bool:
 
 def list_sessions(limit: int = 30):
     """Return sessions sorted by updated_at desc, with light metadata only."""
-    if not SESSIONS_DIR.exists():
+    sd = _user_sessions_dir()
+    if not sd.exists():
         return []
     out = []
-    for p in SESSIONS_DIR.glob('*.json'):
+    for p in sd.glob('*.json'):
         try:
             data = json.loads(p.read_text())
         except Exception:
@@ -525,7 +615,7 @@ def start_new_session():
 
 
 def _session_jsonl_path(sid: str) -> Path:
-    return LOGS_DIR / f'{sid}.jsonl'
+    return _user_logs_dir() / f'{sid}.jsonl'
 
 
 def log_turn_structured(user_input: str, response_text: str, reasoning: str,
@@ -2153,6 +2243,28 @@ with st.sidebar:
     if st.session_state['web_enabled']:
         st.caption(f"웹 검색: {st.session_state['web_provider']}")
 
+    # ----- User / logout -----
+    uid = st.session_state.get('user_id', '_local')
+    if USERS_FROM_SECRETS:
+        st.markdown('<div class="sb-section">사용자</div>', unsafe_allow_html=True)
+        st.caption(f"로그인: `{uid}`")
+        if st.button('로그아웃', use_container_width=True, key='logout_btn'):
+            # Clear chat / docs state so the next user starts clean.
+            for k in (
+                'user_id', 'user_inputs', 'generated_responses',
+                'thinking_traces', 'retrieved_per_turn',
+                'query_variants_per_turn', 'current_session_id',
+                'current_session_title', 'current_session_created_at',
+                'docs', 'doc_embs', 'doc_meta',
+                '_loaded_for_embedder', 'chat_doc_filter',
+            ):
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.rerun()
+    else:
+        st.markdown('<div class="sb-section">사용자</div>', unsafe_allow_html=True)
+        st.caption('단일 사용자 모드 (`_local`)')
+
 
 # =============================================================================
 # View renderers
@@ -2681,19 +2793,21 @@ def view_cache():
                         st.error(f'캐시 삭제 실패: {e}')
 
     st.write('')
+    user_logs = _user_logs_dir()
     _section(
         '대화 로그',
-        f'경로: `{LOGS_DIR}` — 각 대화가 `{{session_id}}.jsonl` 파일로 저장됩니다. '
-        '한 줄당 한 턴 (분석·DB 적재 친화적).',
+        f'경로: `{user_logs}` — 사용자별로 분리. 각 대화가 `{{session_id}}.jsonl` '
+        '파일로 저장됩니다 (한 줄당 한 턴, 분석·DB 적재 친화적).',
     )
 
     # Agent runs log (separate file)
-    if AGENT_LOG.exists():
+    agent_log = _agent_log_path()
+    if agent_log.exists():
         try:
-            n_lines = sum(1 for _ in AGENT_LOG.open('r', encoding='utf-8'))
+            n_lines = sum(1 for _ in agent_log.open('r', encoding='utf-8'))
         except Exception:
             n_lines = '?'
-        size_kb = AGENT_LOG.stat().st_size / 1024
+        size_kb = agent_log.stat().st_size / 1024
         with st.container(border=True):
             cols = st.columns([5, 1, 1])
             cols[0].markdown(f"**`agents.jsonl`** · 에이전트 실행 기록")
@@ -2701,7 +2815,7 @@ def view_cache():
             with cols[2]:
                 try:
                     st.download_button(
-                        '다운로드', data=AGENT_LOG.read_bytes(),
+                        '다운로드', data=agent_log.read_bytes(),
                         file_name='agents.jsonl', mime='application/x-jsonlines',
                         key='dl_agents_jsonl', use_container_width=True,
                     )
@@ -2709,7 +2823,7 @@ def view_cache():
                     pass
 
     jsonl_files = sorted(
-        [p for p in LOGS_DIR.glob('*.jsonl') if p.name != 'agents.jsonl'],
+        [p for p in user_logs.glob('*.jsonl') if p.name != 'agents.jsonl'],
         key=lambda p: p.stat().st_mtime, reverse=True,
     )
     if not jsonl_files:
@@ -2736,14 +2850,15 @@ def view_cache():
                         pass
 
     st.write('')
+    user_dd = _user_data_dir()
     _section(
         '로컬 벡터 스토어',
-        f'경로: `{DATA_DIR}` — 임베더 모델별로 분리되어 저장됩니다.',
+        f'경로: `{user_dd}` — 사용자별로 분리. 임베더 모델마다 또 하위 폴더.',
     )
-    if DATA_DIR.exists():
+    if user_dd.exists():
         rows = []
-        for sub in sorted(DATA_DIR.iterdir()):
-            if not sub.is_dir():
+        for sub in sorted(user_dd.iterdir()):
+            if not sub.is_dir() or sub.name == 'sessions':
                 continue
             doc_dirs = [p for p in sub.iterdir() if p.is_dir()]
             total = 0
@@ -2769,7 +2884,8 @@ def view_cache():
 # Agentic workflows
 # =============================================================================
 
-AGENT_LOG = LOGS_DIR / 'agents.jsonl'
+# NOTE: legacy global. Per-user log path is _agent_log_path(); kept here only
+# to avoid accidental import-time errors. Use _agent_log_path() everywhere.
 
 
 def _agent_format_context(retrieved: list) -> str:
@@ -2858,7 +2974,7 @@ def _agent_log(task_key: str, inputs: dict, output: str, retrieved: list,
         'n_retrieved': len(retrieved_records),
     }
     try:
-        with AGENT_LOG.open('a', encoding='utf-8') as f:
+        with _agent_log_path().open('a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
     except Exception as e:
         st.warning(f'에이전트 로그 저장 실패: {e}')

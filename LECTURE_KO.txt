@@ -1,0 +1,638 @@
+================================================================
+Personal RAG — 강의 자료
+프로젝트 경로: /home/inho/etri/chatbot_demo
+조직: REAL-KENTECH (REliable Agentic AI Lab)
+================================================================
+
+본 문서는 chatbot_demo 프로젝트를 교육 자료로 정리한 것입니다.
+대상: RAG 시스템과 agentic LLM 워크플로를 처음 구현해 보는 개발자.
+프레임워크: Streamlit + OpenAI-호환 SDK + sentence-transformers + rank_bm25.
+
+
+────────────────────────────────────────────────────────────────
+0. 빠른 요약
+────────────────────────────────────────────────────────────────
+
+이 시스템이 하는 일:
+
+  사용자 → 문서 업로드 (PDF/TXT/MD)
+              ↓
+        자동 청킹 + 임베딩 + 디스크 영속 저장
+              ↓
+  사용자 질문 → 하이브리드 검색 (Dense + BM25) + 재정렬
+              ↓
+        LLM 호출 (Hugging Face Router / OpenAI / DashScope / vLLM)
+              ↓
+        [N] 인용 마커가 붙은 답변 + 출처 청크 표시
+              ↓
+        대화/실행 모두 JSONL로 영속 저장 (분석·DB 친화)
+
+추가로, "에이전트" 탭에서는 같은 검색 인프라 위에
+이메일 / 보고서 / 요약 / 데이터 분석 / 비교 분석 5가지 업무 템플릿이
+구조화된 폼으로 실행됩니다.
+
+
+────────────────────────────────────────────────────────────────
+1. RAG 기본 개념 (5분 복습)
+────────────────────────────────────────────────────────────────
+
+RAG (Retrieval-Augmented Generation):
+  LLM이 답을 만들기 전에, 외부 지식 (사용자 문서·웹 등)에서
+  관련 조각을 "검색"해 와서 컨텍스트로 함께 넣어주는 패턴.
+
+왜 필요한가:
+  1) LLM은 학습 시점까지의 지식만 알고 있음 → 최신 정보 못 다룸.
+  2) 내 회사·연구실 문서는 학습에 안 들어가 있음.
+  3) 환각 (hallucination) 줄이려면 답변을 "근거"에 묶어야 함.
+  4) 출처를 명시하면 신뢰도 ↑, 검증 가능.
+
+기본 흐름:
+  1. 문서를 작은 조각 (chunk) 으로 자름.
+  2. 각 청크를 벡터로 변환 (embedding).
+  3. 사용자 질문도 벡터로 변환.
+  4. 벡터 공간에서 가까운 청크를 top-K개 검색.
+  5. 그 청크들을 LLM 프롬프트에 컨텍스트로 같이 넣음.
+  6. LLM이 그 컨텍스트만 가지고 답하도록 시킴.
+
+
+────────────────────────────────────────────────────────────────
+2. 시스템 아키텍처 — 한 장 다이어그램
+────────────────────────────────────────────────────────────────
+
+  ┌──────────────────────────────────────────────────────────┐
+  │                  사용자 질문                              │
+  └──────────────────────────────────────────────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │ (옵션) 이전 대화 맥락 반영해 질문 재작성 │
+        │     "그게 뭐였지?" → "X는 어떻게 작동해?"  │
+        └─────────────────┬─────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │ (옵션) 질문 변형 (multi-query / HyDE)│
+        │  원본 + paraphrase + 가상 답안 문단     │
+        └─────────────────┬─────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │     하이브리드 검색  (top_n 후보)     │
+        │  ┌────────────┐    ┌──────────┐    │
+        │  │ Dense      │    │ BM25     │    │
+        │  │ BGE-M3     │    │ 키워드   │    │
+        │  └─────┬──────┘    └─────┬────┘    │
+        │        └───── RRF 결합 ──┘         │
+        └─────────────────┬─────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │ Cross-encoder 재정렬 (top_n → top_k)│
+        │ BAAI/bge-reranker-v2-m3            │
+        └─────────────────┬─────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │ 문서별 균형 보장 (per-doc reservation)│
+        │ + (옵션) 비교 질문 자동 감지         │
+        └─────────────────┬─────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │ (옵션) 웹 검색 결과 추가            │
+        │ DuckDuckGo / Tavily / Brave        │
+        └─────────────────┬─────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │ 시스템 프롬프트 + Context + 질문     │
+        │ + (옵션) PDF 페이지 이미지 (멀티모달)│
+        └─────────────────┬─────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │           LLM 스트리밍 호출         │
+        │ (gpt-5-mini / Gemma 4 / DeepSeek 등)│
+        └─────────────────┬─────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │ reasoning_content / content 분리   │
+        │ [N] 인용 파싱 + 굵게 + popover     │
+        └─────────────────┬─────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │ 화면 렌더 + ./logs/*.jsonl 저장    │
+        └────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────
+3. 디렉터리 / 파일 구조
+────────────────────────────────────────────────────────────────
+
+chatbot_demo/
+├── app.py                       # 단일 파일 Streamlit 앱 (≈3,200 라인)
+├── requirements.txt             # Cloud 친화적 최소 의존성
+├── requirements-extras.txt      # 풀 기능 (docling/pymupdf/tavily)
+├── README.md                    # 배포 가이드
+├── LECTURE_KO.txt               # 본 문서
+├── .gitignore                   # .env, .data, logs 등 제외
+├── .streamlit/
+│   └── secrets.toml.example     # Cloud용 secrets 템플릿
+├── logo/
+│   └── real_logo.png            # 브랜드 락업
+├── .data/                       # (gitignored) 벡터 인덱스, 세션 메타
+│   ├── sessions/{id}.json
+│   └── {embedder_id}/{doc_hash}/
+│       ├── meta.json
+│       ├── embeddings.npy
+│       └── pages/{n}.png
+└── logs/                        # (gitignored) 분석용 JSONL
+    ├── {session_id}.jsonl       # 대화별 한 파일
+    └── agents.jsonl             # 에이전트 실행 통합
+
+핵심 설계:
+  - 단일 파일 (app.py): 강의·코드 리뷰 편의. 모듈 분리는 production 단계의 일.
+  - 영속 저장 분리: 사용자 데이터 (.data) vs 분석 로그 (logs) vs 비밀 (.env).
+  - .gitignore가 사용자 데이터와 비밀 모두 차단.
+
+
+────────────────────────────────────────────────────────────────
+4. app.py 코드 모듈 맵 (≈3,200 라인의 구조)
+────────────────────────────────────────────────────────────────
+
+라인     섹션                          담당
+─────    ─────────────────────────     ────────────────────────────
+1-50     Imports + secrets bridge       .env 로드, st.secrets→os.environ
+50-100   상수, PROVIDERS, MODELS        공급자 프리셋, 검증된 모델 목록
+100-200  CSS                            UI 스타일링
+200-350  _init_state                    모든 session_state 키 초기화 (45개)
+350-470  영속 저장                       compute_doc_id, save_doc, load_doc,
+                                        세션 JSON, JSONL 로그
+470-620  log_turn_structured + 보조     분석 친화적 JSONL append
+620-700  자동 제목 / 임베더·리랭커 로딩  cached_resource
+700-800  파일 파싱                       parse_pdf_docling (구조 보존),
+                                        parse_pdf_pypdf (폴백), 일반 텍스트
+800-900  청킹                            chunk_elements, chunk_text
+900-1100 검색 단위                       _flatten_chunks, dense_search,
+                                        bm25_search, rrf_fuse, rerank
+1100-1300 retrieve_local + 쿼리 확장     HyDE, multi-query, contextual rewrite
+1300-1500 web_search                     DuckDuckGo / Tavily / Brave
+1500-1700 문서 ingest / reindex          청킹+임베딩+페이지이미지렌더
+1700-1800 모델 파라미터 빌더              _build_completion_params (모델별 분기)
+1800-2000 채팅 LLM 호출 + 스트리밍       stream_chat, non_stream_chat
+2000-2200 인용 파싱·렌더링                parse_citations, render_assistant
+2200-2400 사이드바 (브랜드+nav+세션)      세션 목록 무한 누적, 메뉴 고정
+2400-2700 view_chat                       대화 본문, 빈 hero, 제안 chips
+2700-2850 view_docs                       업로드, 청킹 설정, 검색 미리보기
+2850-3050 view_settings                   공급자/모델/검색/멀티모달/웹
+3050-3150 view_agents                     5종 작업 폼 + 실행 + 다운로드
+3150-3200 view_cache / view_about         로그 다운로드, 시스템 설명
+3200+    view router                     active_view → 해당 함수 호출
+
+
+────────────────────────────────────────────────────────────────
+5. 데이터 흐름: 사용자 시나리오 4종
+────────────────────────────────────────────────────────────────
+
+[시나리오 A] PDF 업로드부터 첫 답변까지
+
+  1. 사용자: 문서 탭 → Q1_report.pdf 업로드
+  2. parse_file(): Docling으로 마크다운 + 페이지 메타 추출
+  3. chunk_elements(): 문단 단위로 묶어 500자 청크 + 페이지 번호 보존
+  4. embedder.encode(): BGE-M3 또는 MiniLM으로 벡터화 (CPU/GPU 자동)
+  5. render_pdf_pages_to_dir(): 각 페이지 PNG로 렌더 (멀티모달 대비)
+  6. save_doc(): meta.json + embeddings.npy + pages/ 디스크 저장
+  7. 사용자: 채팅 탭 → "Q1 매출 성장률은?"
+  8. rewrite_with_context(): 이전 대화 없음 → 원문 그대로
+  9. expand_queries(): HyDE/multi-query 비활성 → variants = [원문]
+  10. dense_search() + bm25_search(): 각각 top_n=20
+  11. rrf_fuse(): RRF로 결합 → top_n 후보
+  12. rerank(): cross-encoder로 재정렬 → top_k=5
+  13. per_doc_min check: 1개 문서뿐이라 균형 보장 skip
+  14. build_messages(): 시스템 프롬프트 + Context + 질문
+  15. stream_chat(): 토큰 단위로 placeholder에 누적 표시
+  16. split_thinking(): <think>...</think> 인라인 제거 (있을 경우)
+  17. parse_citations(): 답변 안의 [1], [2] 추출
+  18. render_assistant(): 답변 + 청크 popover + 추론 expander
+  19. save_current_session(): .data/sessions/{id}.json
+  20. auto_title_session(): 첫 턴이면 LLM이 8자 제목 생성
+  21. log_turn_structured(): logs/{id}.jsonl 한 줄 추가
+
+[시나리오 B] 여러 문서 중 일부만 사용
+
+  - 사용자가 5개 보고서 업로드
+  - 채팅 상단 popover "문서 5/5" 클릭 → multiselect로 2개만 체크
+  - st.session_state['chat_doc_filter'] = [doc_id1, doc_id2]
+  - handle_chat_turn 안에서 검색 직전:
+      all_docs = st.session_state['docs']
+      st.session_state['docs'] = [d for d in all_docs if d['id'] in filt]
+      try: retrieve(...) finally: 원본 복원
+  - 이렇게 임시 swap 패턴으로 retrieve_local 내부 변경 없이 적용
+
+[시나리오 C] 이메일 에이전트 실행
+
+  1. 업무 도구 탭 → "이메일 초안" 선택
+  2. 폼: 수신자/주제/톤/분량/핵심 요점 + (옵션) 문서 선택
+  3. 실행 클릭
+  4. search_query 람다: subject_hint + key_points 결합
+  5. retrieve_local() 호출 (선택된 문서만 대상)
+  6. _email_build(): 작업별 system + user 메시지
+  7. _agent_run_llm(): stream_chat 재사용
+  8. 결과 렌더 + .md 다운로드 버튼
+  9. _agent_log(): logs/agents.jsonl 한 줄 추가
+
+[시나리오 D] 비교 분석 (cross-doc)
+
+  1. 업무 도구 → "비교 분석" 선택
+  2. 대상 A / 대상 B / 비교 기준 입력
+  3. run_agent_task에서 task_key == 'comparison' 감지
+     → per_doc_balance를 일시적으로 True로 강제
+     → 검색 후 finally에서 원복
+  4. 각 문서에서 최소 N개 청크 보장된 상태로 LLM에 컨텍스트 전달
+  5. LLM이 표 형태 비교표 + 해석 + 결론 작성
+
+
+────────────────────────────────────────────────────────────────
+6. 핵심 설계 결정과 트레이드오프
+────────────────────────────────────────────────────────────────
+
+(1) 청킹: paragraph + size cap + sliding window 폴백
+  장점: 의미 단위 보존하면서 길이도 제한
+  단점: 표/코드블록 같은 구조 무시 (Docling 사용 시 일부 보존됨)
+  대안: semantic chunking (LLM으로 의미 경계 찾기) — 비싸지만 정확
+
+(2) 검색: Dense + BM25 + RRF (하이브리드)
+  Dense (BGE-M3)만 쓰면: 의미는 잡지만 정확한 키워드 (이름/숫자) 놓침
+  BM25만 쓰면: 키워드는 정확하지만 동의어/패러프레이즈 못 잡음
+  RRF: 두 랭킹의 역수 합 → 양쪽 모두에서 잘 잡힌 청크가 상위
+  설정: 고급 검색 설정에서 모드 변경 가능 (hybrid/dense/bm25)
+
+(3) 재정렬: cross-encoder
+  retrieval 1차는 빠른 벡터 검색 → 후보 top_n (예: 20)
+  재정렬은 cross-encoder가 (질문, 청크) 쌍 점수 산출 → top_k (예: 5)
+  품질↑ 속도↓ trade-off
+  무료 티어 RAM 부족 시 OFF 권장
+
+(4) HyDE / Multi-query / Contextual rewrite
+  - Multi-query: 같은 질문을 N개 표현으로 paraphrase → recall ↑
+  - HyDE: LLM이 가상 답안 작성 → 그걸 임베딩 → 실제 답안과 의미 비슷한 청크 끌어옴
+  - Contextual rewrite: 이전 대화 보고 대명사·생략 자동 보완
+    (예: "그건 어떻게 되는데?" → "X 정책의 적용 절차는?")
+  모두 LLM 호출 추가됨 → 속도/비용 trade-off
+
+(5) 문서별 균형 보장 (per-doc reservation)
+  현실 문제: top_k=5인데 1번 문서가 점수 강해서 5개 모두 점령
+  해결: 각 문서에서 최소 1개 (또는 N개) 청크를 강제로 reserve
+  비교 질문 ("vs", "차이", "비교") 감지 시 자동으로 2로 상향
+
+(6) 영속 저장: 임베더별 격리
+  같은 문서를 BGE-M3로 임베딩한 것과 MiniLM으로 한 것은 다른 벡터
+  → .data/BAAI_bge-m3/ vs .data/sentence-transformers_paraphrase.../
+  임베더 모델 바꿔도 이전 캐시 안 깨지고 보존
+
+(7) 로깅: JSONL 한 줄 = 한 턴
+  Postgres 친화 스키마: turn 단위 행 + retrieved/settings JSONB
+  pandas로 즉시 로드: pd.read_json('logs/*.jsonl', lines=True)
+  분석 예: "재정렬 켰을 때 인용률 차이는?", "모델별 평균 응답 시간?"
+
+
+────────────────────────────────────────────────────────────────
+7. 모델별 호환성 (실측 결과)
+────────────────────────────────────────────────────────────────
+
+이 부분은 직접 라이브 API 호출로 검증한 결과입니다. RAG 시스템을
+다양한 공급자로 돌리려면 반드시 알아야 할 양식 차이입니다.
+
+[OpenAI 신구 분리]
+
+  공급자 = OpenAI (api.openai.com/v1)
+
+  ┌─────────────────────┬──────────────┬──────────────┬─────────────┐
+  │ 모델 군              │ max_tokens   │ temperature  │ top_p / pp  │
+  ├─────────────────────┼──────────────┼──────────────┼─────────────┤
+  │ gpt-4o, gpt-4o-mini │ OK           │ 자유         │ 자유        │
+  │ gpt-4.1*            │ OK           │ 자유         │ 자유        │
+  │ gpt-5*, gpt-5.x*    │ 거부 ⚠      │ 1.0만 허용   │ 거부 ⚠     │
+  │                     │ max_completion_tokens 필수                 │
+  │ o1, o3, o4 시리즈    │ 거부 ⚠      │ 거부         │ 거부        │
+  │                     │ max_completion_tokens 필수 + 추론 토큰     │
+  │                     │ 여유 확보 (≥1500 권장)                     │
+  └─────────────────────┴──────────────┴──────────────┴─────────────┘
+
+  대응: app.py의 _build_completion_params 함수가 모델 이름으로 분기하여
+  자동으로 max_tokens vs max_completion_tokens 교체, sampling 제거.
+
+  추가: extra_body의 top_k / chat_template_kwargs는 OpenAI 거부 → 자동 제거.
+
+[Hugging Face Router 일부 provider]
+
+  Cerebras 계열 (예: meta-llama/Llama-3.1-8B-Instruct, openai/gpt-oss-120b)
+  → extra_body의 top_k 거부 ⚠
+
+  대응: HF Router 엔드포인트 감지 시 top_k 자동 제거 (다른 sampling은 OK).
+
+[DashScope (Qwen 공식)]
+
+  enable_thinking 토글: extra_body.enable_thinking (chat_template_kwargs X)
+  top_k: 허용
+  대응: 엔드포인트가 dashscope면 enable_thinking 위치 자동 분기.
+
+[추론 모델의 응답 위치]
+
+  ┌────────────────────────────────┬────────────────────────────┐
+  │ 모델                            │ reasoning가 어디에 오는가     │
+  ├────────────────────────────────┼────────────────────────────┤
+  │ Qwen3-Thinking, DeepSeek-R1     │ content 안 <think>..</think>│
+  │ openai/gpt-oss-*, Kimi-K2*      │ reasoning_content 필드      │
+  │ OpenAI o1/o3/o4                  │ 숨김 (reasoning_tokens만)   │
+  │ DeepSeek-V4-Pro, Gemma-4 일반   │ 추론 없음 (직접 content)     │
+  └────────────────────────────────┴────────────────────────────┘
+
+  대응:
+    1. delta.reasoning_content / delta.reasoning 캡처 (스트리밍 시)
+    2. 끝난 뒤 content 안의 <think>..</think> 추가 split (split_thinking)
+    3. 그 외 (<|channel>thought\n..<channel|> Gemma 4 포맷) 도 같이 처리
+
+
+────────────────────────────────────────────────────────────────
+8. UI 구조
+────────────────────────────────────────────────────────────────
+
+전체 레이아웃:
+
+  ┌──────────────────┬────────────────────────────────────────────┐
+  │ [로고]            │ [세션 제목]   [문서 N/M ▾]   [모델 ▾]      │
+  │ Personal RAG     ├────────────────────────────────────────────┤
+  │ 내 문서 기반…    │                                            │
+  │                  │  (활성 view: 대화 / 문서 / 업무 도구 /     │
+  │ ┌────────────┐  │   설정 / 캐시 / 소개)                       │
+  │ │  새 대화   │  │                                            │
+  │ └────────────┘  │                                            │
+  │                  │                                            │
+  │ 메뉴             │                                            │
+  │ ▸ 대화           │                                            │
+  │   문서           │                                            │
+  │   업무 도구      │                                            │
+  │   설정           │                                            │
+  │   캐시           │                                            │
+  │   소개           │                                            │
+  │                  │                                            │
+  │ 대화             │                                            │
+  │ ┌─────────────┐ │                                            │
+  │ │ session 1 × │ │                                            │
+  │ │ session 2 × │ │                                            │
+  │ │ ...         │ │  (max-height 300px, 내부 스크롤)            │
+  │ └─────────────┘ │                                            │
+  │                  │                                            │
+  │ 현재 상태         │                                            │
+  │ 모델: ...        │                                            │
+  │ 문서 N개·청크 M개│                                            │
+  └──────────────────┴────────────────────────────────────────────┘
+
+핵심 설계:
+  - 사이드바 메뉴 고정 (대화 누적되어도 메뉴는 위에 있음)
+  - 대화 목록은 자체 스크롤 컨테이너 → 100개 쌓여도 다른 영역 안 밀림
+  - 채팅 입력창: st.chat_input (Streamlit native, 하단 고정)
+  - 빈 hero 상태: 로고 + 안내 + 4개 제안 chip
+
+
+────────────────────────────────────────────────────────────────
+9. 배포 가이드 (GitHub + Streamlit Cloud)
+────────────────────────────────────────────────────────────────
+
+[1단계] 로컬 git 초기화 + 커밋
+
+  cd chatbot_demo
+  git config user.name "your-name"
+  git config user.email "your@email"
+  git add .
+  git status                              # 7개 파일만 보이면 OK
+  git commit -m "Initial commit"
+
+[2단계] GitHub repo 생성 + push
+
+  브라우저: https://github.com/new (README/license 추가 X)
+  Personal Access Token 생성:
+    https://github.com/settings/tokens → Generate (classic) → repo scope
+
+  git remote add origin https://github.com/<USER>/<REPO>.git
+  git branch -M main
+  # 토큰을 URL에 임시로 박아 push:
+  git remote set-url origin "https://x-access-token:${TOKEN}@github.com/<USER>/<REPO>.git"
+  git push -u origin main
+  git remote set-url origin "https://github.com/<USER>/<REPO>.git"   # 토큰 청소
+
+[3단계] Streamlit Cloud 배포
+
+  1. https://share.streamlit.io 접속, GitHub 로그인
+  2. 조직 repo면 OAuth 승인 필요:
+     https://github.com/organizations/<ORG>/settings/oauth_application_policy
+     → Streamlit 승인
+  3. "New app" → 인터랙티브 picker로:
+     Repo: <USER>/<REPO>, Branch: main, Main file: app.py
+  4. Advanced settings → Secrets:
+       HF_TOKEN = "hf_..."
+       OPENAI_API_KEY = "sk-..."
+  5. Deploy → 빌드 5-10분
+  6. 첫 실행 후 사이드바 설정:
+     - 임베딩 모델: MiniLM (BGE-M3는 2GB+로 무료 티어 RAM 초과)
+     - 재정렬 모델: OFF (RAM 절약)
+
+[배포 후 코드 갱신]
+
+  git add -A && git commit -m "..."
+  TOKEN=$(grep '^GITHUB_TOKEN' /home/inho/etri/.env | awk -F= '{print $2}' | tr -d ' "')
+  git -c http.extraHeader="Authorization: Bearer $TOKEN" push
+  # Streamlit Cloud는 main 브랜치 변경 자동 감지 → 재배포
+
+
+────────────────────────────────────────────────────────────────
+10. 자주 발생하는 오류 카탈로그 + 해결
+────────────────────────────────────────────────────────────────
+
+[A] LLM API 관련
+
+  A-1. "Unsupported parameter: max_tokens" (OpenAI gpt-5 / o-series)
+       원인: GPT-5 시리즈와 o1/o3/o4 reasoning 모델은 max_completion_tokens 사용
+       해결: _build_completion_params가 자동 분기. 직접 수정 불필요.
+
+  A-2. "Unsupported value: temperature does not support 0.7" (OpenAI gpt-5)
+       원인: GPT-5는 temperature=1.0만 허용
+       해결: 자동으로 GPT-5/o-series에는 sampling 파라미터 미전송.
+
+  A-3. "Unrecognized request argument supplied: top_k" (OpenAI)
+       원인: OpenAI는 top_k 모름
+       해결: _is_openai_endpoint() 감지 후 extra_body에서 제거.
+
+  A-4. "top_k: property 'top_k' is unsupported" (HF Router Cerebras)
+       원인: Llama-3.1-8B / gpt-oss 등 Cerebras 서빙 모델
+       해결: HF Router는 기본적으로 top_k 미전송 (provider별 다름).
+
+  A-5. "Model not supported by any provider you have enabled" (HF Router 400)
+       원인: 해당 모델이 어떤 inference provider에도 deploy 안 됨
+       해결: 다른 모델 선택, 또는 모델 카드의 "Inference Providers" 박스 확인
+
+  A-6. "Authentication failed" / 401 (LLM API)
+       원인: API 키 미설정·만료·권한 부족
+       해결: .env 또는 Streamlit secrets 확인. 새 키 발급.
+
+  A-7. "Could not finish the message because max_tokens was reached" (o3-mini)
+       원인: reasoning 모델이 토큰을 추론에 다 써버림
+       해결: max_tokens (= max_completion_tokens)를 1500+ 로 자동 상향됨
+
+[B] 검색·임베딩 관련
+
+  B-1. CUDA OOM / 메모리 부족 (BGE-M3 + Reranker)
+       원인: 두 모델 합쳐 ~3GB, 무료 Streamlit Cloud의 RAM 초과
+       해결: 설정 → 임베딩 모델을 MiniLM으로, 재정렬 OFF.
+
+  B-2. 첫 임베딩 매우 느림
+       원인: 첫 사용 시 모델 가중치 다운로드 (BGE-M3 ~2.2GB, Reranker ~580MB)
+       해결: 정상. 다음 실행부터는 디스크 캐시에서 즉시 로드.
+
+  B-3. PDF에서 텍스트 추출 안 됨
+       원인: 스캔 이미지 PDF, 또는 PDF 내부 텍스트가 제대로 인코딩 안 됨
+       해결: OCR이 필요 (Docling이 RapidOCR 사용 시도). 그래도 실패하면
+             해당 PDF는 인덱스에서 제외 (st.warning 표시됨).
+
+  B-4. 답변이 "제공된 자료에서는 답을 찾을 수 없습니다"만 나옴
+       원인 후보:
+         (a) retrieval이 관련 청크를 못 잡음 (top_k 너무 작음, 임베더 약함)
+         (b) LLM이 시스템 프롬프트 너무 엄격 해석
+         (c) 질문이 너무 모호 (HyDE / Multi-query 켜보기)
+       해결: 검색 미리보기로 어떤 청크가 잡히는지 먼저 확인.
+             top_k 늘려보기, 임베더를 BGE-M3로, HyDE 켜기.
+
+  B-5. 청크가 한 문서에 다 쏠림
+       원인: 한 문서의 임베딩 점수가 다른 문서보다 일관되게 높음
+       해결: 설정 → "여러 문서 균형 검색" ON, per_doc_reserve 2+ 로.
+             또는 채팅 상단 "문서 N/M ▾" 에서 직접 선택.
+
+[C] 웹 검색 관련
+
+  C-1. "No module named 'tavily'"
+       원인: Tavily provider 선택했지만 tavily-python 미설치
+       해결: pip install tavily-python (또는 DuckDuckGo로 변경)
+
+  C-2. DuckDuckGo 검색 실패 / 빈 결과
+       원인: rate limit, network, 또는 ddgs 라이브러리 버전 이슈
+       해결: 몇 초 후 재시도, 또는 Tavily 키 발급해서 그쪽 사용
+
+  C-3. "Tavily API 키가 비어 있습니다"
+       원인: TAVILY_API_KEY 환경변수/secrets 미설정
+       해결: .env 또는 Streamlit secrets에 추가, 또는 provider를 duckduckgo로
+
+[D] Streamlit 배포 관련
+
+  D-1. Streamlit Cloud "Unexpected error" on deploy
+       원인 후보:
+         (a) 조직 repo + OAuth 승인 없음 → clone 실패
+         (b) slug 중복
+         (c) 무료 티어 private 앱 슬롯 초과
+       해결: slug 다른 걸로 / 조직 OAuth 승인 / public 전환
+
+  D-2. "Repository not found" on git push
+       원인: 토큰 권한 부족 또는 잘못된 repo URL
+       해결: PAT에 repo scope 있는지, URL의 owner/name 정확한지 확인
+
+  D-3. Streamlit Cloud 빌드 timeout
+       원인: requirements.txt에 무거운 의존성 너무 많음 (docling 등)
+       해결: 무거운 건 requirements-extras.txt로 옮김 (이미 분리됨).
+
+  D-4. 재배포 후 .data, logs 사라짐
+       원인: Streamlit Cloud 파일시스템은 ephemeral
+       해결: 영속 필요하면 Postgres/S3 연결. 데모용으론 사용자에게 안내.
+
+[E] Streamlit 런타임 관련
+
+  E-1. "set_page_config can only be called once" 또는 비슷한 메시지
+       원인: st 함수 호출이 module load 중 중복
+       해결: app.py 상단의 set_page_config가 단 한 번만 호출되는지 확인.
+
+  E-2. 사이드바 버튼 누른 후 변화 없음
+       원인: rerun이 안 일어남, 또는 다른 변수가 같이 변함
+       해결: 버튼 핸들러 안에서 st.rerun() 명시적으로 호출됐는지 확인.
+             버튼 key 충돌 없는지 확인 (모든 key 고유해야).
+
+  E-3. 추론 모델 응답에 <think>...</think>가 그대로 노출됨
+       원인: split_thinking 패턴 불일치 (모델별 thinking 포맷 다름)
+       해결: 모델이 어떤 포맷으로 thinking을 내는지 보고 패턴 추가.
+             현재 지원: <think>, <|channel>thought\n..<channel|>
+
+[F] 기타
+
+  F-1. 로고가 화면에 안 보임
+       원인: logo/real_logo.png 경로 잘못, 또는 파일 누락
+       해결: ls chatbot_demo/logo/ 로 파일 존재 확인. 코드의 LOGO_PATH가
+             올바른지 확인. 없으면 코드의 fallback (텍스트만)으로 동작.
+
+  F-2. JSONL 파일이 너무 큼
+       원인: text 필드를 자르지 않으면 한 턴이 수십 KB 가능
+       해결: log_turn_structured가 chunk text를 1200자로 cap. retrieved 청크 텍스트도 동일.
+
+  F-3. 채팅 입력창이 화면 가려져 안 보임
+       원인: CSS의 stHeader 숨김 + padding 조합 문제
+       해결: app.py 상단의 CSS 블록 검토 (padding-top, max-width 조정).
+
+
+────────────────────────────────────────────────────────────────
+11. 확장 / 다음 단계 아이디어
+────────────────────────────────────────────────────────────────
+
+[난이도 낮음]
+  - 더 많은 파일 형식 (DOCX, PPTX, HTML) — python-docx, python-pptx 추가
+  - 새 에이전트 작업 (회의록 정리, 슬라이드 outline, 번역)
+  - 토큰 사용량 표시 (resp.usage) → UI에 비용 추정
+
+[난이도 중]
+  - Postgres 연동: logs/*.jsonl을 실시간으로 DB에 적재
+  - 대화 export/import (JSON → 공유 가능)
+  - 메시지별 좋아요/싫어요 + 학습 데이터 수집
+  - 사용자 인증 (st.secrets 외 OAuth 추가)
+
+[난이도 높음]
+  - Agentic loop: LLM이 추가 검색 필요 판단 → 자동 follow-up retrieval
+  - Knowledge graph: 문서들 entity/relation 추출 → 그래프 traversal
+  - 멀티 사용자 (multi-tenant) + 사용자별 .data 격리
+  - 실시간 협업 (한 세션을 여러 사람이 보기)
+  - Function calling: LLM이 도구 호출 (계산기, 코드 실행 등)
+
+
+────────────────────────────────────────────────────────────────
+12. 학습 자료 / 참고
+────────────────────────────────────────────────────────────────
+
+핵심 라이브러리:
+  - Streamlit: https://docs.streamlit.io
+  - OpenAI Python SDK: https://github.com/openai/openai-python
+  - sentence-transformers: https://www.sbert.net
+  - rank_bm25: https://github.com/dorianbrown/rank_bm25
+  - Docling: https://github.com/DS4SD/docling
+
+모델:
+  - BAAI/bge-m3: https://huggingface.co/BAAI/bge-m3
+  - BAAI/bge-reranker-v2-m3: https://huggingface.co/BAAI/bge-reranker-v2-m3
+  - sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+
+핵심 논문:
+  - HyDE (Hypothetical Document Embeddings)
+    Gao et al. 2022. "Precise Zero-Shot Dense Retrieval without Relevance Labels"
+  - RRF (Reciprocal Rank Fusion)
+    Cormack et al. 2009. "Reciprocal Rank Fusion outperforms Condorcet and
+    individual Rank Learning Methods"
+  - Multi-query / Query expansion: 다양한 후속 연구
+
+
+────────────────────────────────────────────────────────────────
+13. 마무리
+────────────────────────────────────────────────────────────────
+
+이 프로젝트는 "데이터 사이언티스트가 만든 작은 RAG 도구"가 "실제 서비스
+처럼 쓸 수 있는 챗봇 + 에이전트 워크스페이스"로 진화한 결과입니다.
+
+핵심 학습 포인트:
+  1. RAG는 검색 + 생성의 결합 — 검색 품질이 곧 답변 품질.
+  2. 검색은 단일 기법(dense)으로 부족 — 하이브리드 + 재정렬 + 쿼리 확장.
+  3. LLM 공급자별로 API 양식이 다름 — 호환성 레이어가 필요.
+  4. 사용자 데이터는 영속화 + 분석 가능한 구조 (JSONL → DB)로.
+  5. UI/UX가 곧 채택률 — 사이드바, hero, 인용 popover 모두 디테일.
+  6. 배포는 보안 + 자원 제약을 처음부터 고려 (.gitignore, RAM, secrets).
+
+추가 질문/개선 요청은 issue로:
+  https://github.com/REAL-KENTECH/Personal-RAG/issues
+
+================================================================
+끝.
+================================================================
