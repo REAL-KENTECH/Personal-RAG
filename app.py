@@ -85,13 +85,26 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-      /* Hide Streamlit's default top toolbar so our content has full vertical space
-         and our header is not clipped behind it. */
-      [data-testid="stHeader"],
+      /* Hide the noisy parts of Streamlit's default top toolbar (deploy button,
+         status widget, decoration line) but KEEP the header container so the
+         sidebar collapse/expand control still has somewhere to anchor. */
       [data-testid="stToolbar"],
       [data-testid="stDecoration"],
       [data-testid="stStatusWidget"] { display: none !important; }
-      header[data-testid="stHeader"] { height: 0 !important; min-height: 0 !important; }
+      [data-testid="stHeader"] { background: transparent !important; }
+
+      /* Ensure the sidebar can be reopened after the user collapses it. The
+         "show" control sits at the top-left when the sidebar is closed. */
+      [data-testid="stSidebarCollapsedControl"],
+      [data-testid="collapsedControl"],
+      button[kind="header"][aria-label*="sidebar" i],
+      button[aria-label="Open sidebar"],
+      button[aria-label*="open" i][aria-label*="sidebar" i] {
+        display: flex !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        z-index: 999 !important;
+      }
 
       /* Sidebar: a bit wider so brand and labels don't clip. Add top padding so
          brand sits comfortably below the viewport edge. */
