@@ -106,27 +106,48 @@ st.markdown(
         z-index: 999 !important;
       }
 
-      /* Sidebar: a bit wider so brand and labels don't clip. Add top padding so
-         brand sits comfortably below the viewport edge. */
-      [data-testid="stSidebar"] { width: 290px !important; min-width: 290px !important; }
-      [data-testid="stSidebar"] > div:first-child { width: 290px !important; min-width: 290px !important; padding-top: 1.2rem; }
+      /* Sidebar visibility + width. Explicitly force display + min-width so
+         no later cascade can hide it. */
+      [data-testid="stSidebar"] {
+        display: flex !important;
+        visibility: visible !important;
+        width: 290px !important;
+        min-width: 290px !important;
+      }
+      [data-testid="stSidebar"] > div:first-child {
+        width: 290px !important;
+        min-width: 290px !important;
+        padding-top: 1.2rem;
+      }
       [data-testid="stSidebar"] .stButton button {
         text-align: left; justify-content: flex-start;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
 
-      /* Main content: centered, comfortable max-width, generous top padding now
-         that the Streamlit toolbar is hidden — keeps the first element clear of
-         the viewport edge. */
-      .main .block-container,
+      /* Main content padding. IMPORTANT: scope only to the main column so we
+         don't accidentally cap the whole app's width or hide the sidebar.
+         Older selector `[data-testid="block-container"]` was too generic. */
+      [data-testid="stMain"] .block-container,
       [data-testid="stMainBlockContainer"],
-      [data-testid="block-container"] {
+      section.main > .block-container {
         max-width: 920px;
         padding-top: 2.2rem;
         padding-bottom: 8rem;
         padding-left: 32px;
         padding-right: 32px;
-        margin: 0 auto;
+        margin-left: auto;
+        margin-right: auto;
+      }
+
+      /* Mobile fallback: let main content use full width on narrow screens. */
+      @media (max-width: 900px) {
+        [data-testid="stMain"] .block-container,
+        [data-testid="stMainBlockContainer"],
+        section.main > .block-container {
+          max-width: 100% !important;
+          padding-left: 14px !important;
+          padding-right: 14px !important;
+        }
       }
 
       /* App brand inside sidebar. */
