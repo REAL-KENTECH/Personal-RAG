@@ -486,17 +486,35 @@ def _render_login_screen():
     st.stop()
 
 
+def _is_streamlit_cloud() -> bool:
+    """Detect Streamlit Community Cloud — apps are mounted under /mount/src/."""
+    return Path('/mount/src').exists()
+
+
 def _auth_gate():
     """Resolve the active user_id:
-      - users configured in st.secrets['users'] → render login form, set user_id
-        to the verified username.
-      - no users configured → single-tenant '_local'. Local dev only."""
+      - users configured in st.secrets['users'] → render login form,
+        set user_id to the verified username (persistent identity).
+      - no users configured AND deployed on Streamlit Cloud → each browser
+        session gets a fresh anonymous user_id (per-visitor isolation).
+      - no users configured AND running locally → single-tenant '_local'
+        (so a developer keeps their persisted data between reruns).
+    """
     if 'user_id' in st.session_state and st.session_state['user_id']:
         return
-    if not USERS_FROM_SECRETS:
-        st.session_state['user_id'] = '_local'
+
+    if USERS_FROM_SECRETS:
+        _render_login_screen()
         return
-    _render_login_screen()
+
+    if _is_streamlit_cloud():
+        # New visitor on a shared deployment without login → give them their
+        # own isolated workspace for this browser session. Closing the tab
+        # ends the session; previous anonymous data remains on disk under
+        # its UUID until an admin cleans it up.
+        st.session_state['user_id'] = '_anon_' + uuid.uuid4().hex[:10]
+    else:
+        st.session_state['user_id'] = '_local'
 
 
 _auth_gate()
@@ -2301,11 +2319,10 @@ with st.sidebar:
 
     # ----- User / logout -----
     uid = st.session_state.get('user_id', '_local')
+    st.markdown('<div class="sb-section">사용자</div>', unsafe_allow_html=True)
     if USERS_FROM_SECRETS:
-        st.markdown('<div class="sb-section">사용자</div>', unsafe_allow_html=True)
         st.caption(f"로그인: `{uid}`")
         if st.button('로그아웃', use_container_width=True, key='logout_btn'):
-            # Clear chat / docs state so the next user starts clean.
             for k in (
                 'user_id', 'user_inputs', 'generated_responses',
                 'thinking_traces', 'retrieved_per_turn',
@@ -2317,9 +2334,11 @@ with st.sidebar:
                 if k in st.session_state:
                     del st.session_state[k]
             st.rerun()
+    elif uid.startswith('_anon_'):
+        st.caption(f"익명 세션: `{uid}`")
+        st.caption('이 브라우저 탭에서만 유효. 새 탭/창은 별도 데이터.')
     else:
-        st.markdown('<div class="sb-section">사용자</div>', unsafe_allow_html=True)
-        st.caption('단일 사용자 모드 (`_local`)')
+        st.caption(f"로컬 단일 사용자: `{uid}`")
 
 
 # =============================================================================
