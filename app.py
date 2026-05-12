@@ -411,7 +411,29 @@ _init_state()
 
 def _render_login_screen():
     """Render brand + login form. Sets user_id on success and reruns; otherwise
-    st.stop()s so the rest of the app is gated off."""
+    st.stop()s so the rest of the app is gated off.
+
+    Also renders a minimal sidebar (brand only) so the page does not look like
+    the sidebar disappeared — it just has no nav until login completes.
+    """
+    with st.sidebar:
+        if _LOGO_URI:
+            st.markdown(
+                f'<div style="text-align:center; padding:4px 0 4px 0;">'
+                f'<img src="{_LOGO_URI}" '
+                f'style="width:100%; max-width:220px; height:auto; display:block; margin:0 auto;" />'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            '<div class="sb-brand" style="text-align:center; font-size:14px;">Personal RAG</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="sb-tagline" style="text-align:center;">로그인 후 이용</div>',
+            unsafe_allow_html=True,
+        )
+
     if _LOGO_URI:
         st.markdown(
             f'<div style="text-align:center; margin-top:80px; margin-bottom:8px;">'
