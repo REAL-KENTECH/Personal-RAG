@@ -3371,7 +3371,7 @@ def view_about():
         - **대화 로그**: `./logs/{session_id}.jsonl` — 세션별로 한 파일, 한 줄당 한 턴. 분석·DB 친화적 구조.
           필드: session_id, turn_index, timestamp, user_message, assistant_message, reasoning, model/provider, elapsed_seconds, retrieved (rank·source·score·page·url), citation_numbers_used, query_variants, settings_snapshot (rerank/HyDE/multi-query/per-doc 등 모든 설정 스냅샷).
           pandas: `pd.concat([pd.read_json(f, lines=True) for f in glob.glob('logs/*.jsonl')])`.
-          Postgres: `\copy turns FROM '...' WITH (FORMAT json)` 또는 batched insert.
+          Postgres: `\\copy turns FROM '...' WITH (FORMAT json)` 또는 batched insert.
 
         #### 지원 LLM 엔드포인트
         Hugging Face Inference Router · OpenAI · Alibaba DashScope · vLLM / 로컬 OpenAI-호환 서버.
