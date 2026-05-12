@@ -1,0 +1,10 @@
+streamlit>=1.30
+openai>=1.0
+python-dotenv
+numpy
+sentence-transformers>=2.7
+huggingface_hub
+pypdf
+rank_bm25
+ddgs
+requests

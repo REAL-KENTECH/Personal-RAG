@@ -1,0 +1,15 @@
+# Heavy optional dependencies. Install locally for full features.
+# These are intentionally NOT in requirements.txt so Streamlit Cloud free tier
+# can install the app without timing out.
+#
+# Install with:
+#   pip install -r requirements-extras.txt
+#
+# Graceful fallbacks if any of these are missing:
+#   docling  → falls back to pypdf (no table/heading structure)
+#   pymupdf  → no PDF page-image rendering (multimodal feature disabled)
+#   tavily-python → only when Tavily provider is selected
+
+docling
+pymupdf
+tavily-python

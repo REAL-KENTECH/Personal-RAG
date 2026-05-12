@@ -1,0 +1,127 @@
+# Personal RAG (REAL Lab)
+
+내 문서 기반 질의응답 + 업무 자동화 챗봇.
+
+OpenAI 호환 LLM (Hugging Face Router · OpenAI · DashScope · vLLM) · 하이브리드 검색 (Dense+BM25+RRF) · 재정렬 · HyDE/Multi-query · 멀티모달 PDF · 실시간 웹 검색 · 5종 에이전트 워크플로 (이메일 / 보고서 / 요약 / 분석 / 비교) · 세션별 영속 저장 · 인용 + 출처 추적.
+
+## 구조
+
+```
+chatbot_demo/
+├── app.py                       # Streamlit 단일 파일 (≈3,200 라인)
+├── requirements.txt             # Cloud 친화적 최소 의존성
+├── requirements-extras.txt      # 풀 기능 (docling / pymupdf / tavily)
+├── .streamlit/
+│   └── secrets.toml.example     # 키 템플릿 (실제 secrets.toml은 gitignored)
+├── logo/real_logo.png           # 브랜드 로고
+├── .data/                       # 벡터 인덱스·세션 메타 (gitignored)
+└── logs/                        # 대화·에이전트 실행 로그 (gitignored)
+```
+
+## 로컬 실행
+
+```bash
+git clone <your-repo-url>
+cd chatbot_demo
+pip install -r requirements.txt
+pip install -r requirements-extras.txt   # 선택: PDF 구조화·멀티모달
+
+# 옵션 A: 프로젝트 루트에 .env
+cp .streamlit/secrets.toml.example .env
+# .env 안의 키를 실제 값으로 채우고 TOML 문법을 KEY=VALUE 로 바꿔주세요
+
+# 옵션 B: Streamlit secrets
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# 위 파일은 자동 gitignore — 안전합니다
+
+streamlit run app.py
+```
+
+## Streamlit Community Cloud 배포
+
+### 사전 준비
+
+1. GitHub repo 준비 (아래 "GitHub 푸시" 섹션 참고).
+2. 해당 repo가 public 이거나, Streamlit Cloud에 GitHub 권한 부여.
+
+### 배포 단계
+
+1. https://share.streamlit.io 접속 → "New app"
+2. Repo / branch / main file 선택:
+   - **Main file path**: `app.py`
+   - **Branch**: `main`
+3. **Advanced settings → Secrets** 에 키 입력:
+   ```toml
+   HF_TOKEN = "hf_..."
+   OPENAI_API_KEY = "sk-..."
+   ```
+   필요한 것만. `.streamlit/secrets.toml.example` 참고.
+4. Deploy 클릭.
+
+### 자원 한계 주의
+
+Streamlit Community Cloud 무료 티어는 RAM이 제한적입니다 (~1 GB 안팎). 기본 설정의 일부는 자원을 많이 씁니다:
+
+| 항목 | 메모리 | 권장 |
+|---|---|---|
+| 임베딩 모델 BGE-M3 | ~2.2 GB | **MiniLM 다국어** 로 변경 (~470 MB). 설정 → 검색 → 임베딩 모델 |
+| Reranker (BGE-reranker-v2-m3) | ~580 MB | 자원 부족 시 OFF |
+| Docling (PDF 구조 파싱) | 모델 다운로드 ~수 GB | `requirements.txt`에 없음 → 자동으로 pypdf 폴백 |
+| 페이지 이미지 멀티모달 | pymupdf 필요 | 기본 OFF, requirements-extras 설치 시 사용 |
+
+**Cloud 첫 사용 시 권장 흐름:**
+1. 배포 → 사이드바 `설정` 탭 진입
+2. 임베딩 모델을 `paraphrase-multilingual-MiniLM-L12-v2`로 변경
+3. `정확도 우선 (재정렬 모델 사용)` 체크 해제
+4. 문서 업로드 (txt/md/작은 PDF)
+5. 질문 시작
+
+## GitHub 푸시
+
+처음이라면:
+
+```bash
+cd /home/inho/etri/chatbot_demo
+
+# 새 git repo 초기화 (이 폴더만 독립 repo로)
+git init
+git add .
+git status                # 트래킹 대상 확인 (logs/, .data/, .env 안 보여야 OK)
+git commit -m "Initial commit: Personal RAG chatbot"
+
+# GitHub에서 빈 repo를 만든 뒤 (예: yourname/personal-rag):
+git branch -M main
+git remote add origin git@github.com:yourname/personal-rag.git
+git push -u origin main
+```
+
+이후 변경분:
+```bash
+git add -A && git commit -m "..." && git push
+```
+
+## 영속 데이터 위치 (배포 시 주의)
+
+- `./.data/{embedder}/{doc_hash}/` — 임베딩 / 청크 / 페이지 이미지
+- `./.data/sessions/{id}.json` — 대화 세션 메타
+- `./logs/{session_id}.jsonl` — 사용자 + 어시스턴트 대화 기록 (한 줄 = 한 턴)
+- `./logs/agents.jsonl` — 에이전트 작업 실행 기록
+
+**Streamlit Cloud의 파일시스템은 ephemeral 합니다** — 컨테이너 재시작 시 사라집니다. 영속이 필요하면:
+- DB 연동 (Postgres 등). `logs/*.jsonl` 스키마가 그대로 DB 테이블로 들어갑니다.
+- 외부 스토리지 (S3 등) 사용.
+- 로컬 호스팅 (직접 서버에 배포).
+
+## 보안 체크리스트
+
+- [x] `.env` / `.streamlit/secrets.toml` 은 `.gitignore`에 포함됨
+- [x] `logs/`, `.data/` 도 gitignored (사용자 데이터·키 포함될 수 있음)
+- [x] API 키 코드에 하드코딩 없음 (`grep -rE "sk-|hf_|tvly-"` 결과 비어있음)
+- [x] `st.secrets` → `os.environ` 브리지로 secrets 안전 전달
+
+## 라이선스 & 크레딧
+
+- LLM endpoints: 각 사용자 약관 적용 (OpenAI · Hugging Face · DashScope 등).
+- 모델: BAAI/bge-m3, BAAI/bge-reranker-v2-m3, sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+- 파싱: Docling (선택), PyMuPDF (선택), pypdf
+- 검색: rank_bm25, ddgs
