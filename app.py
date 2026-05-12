@@ -81,75 +81,13 @@ st.set_page_config(
     initial_sidebar_state='expanded',
 )
 
-# CSS — sidebar nav + centered main, chat-service aesthetic. No text clipping.
+# CSS — minimal custom styling. We deliberately do NOT force display/width on
+# Streamlit's own layout elements (stSidebar, stHeader, etc.) so the framework
+# can manage its own responsive behavior, the sidebar can be collapsed and
+# reopened normally, and future Streamlit DOM changes don't break our layout.
 st.markdown(
     """
     <style>
-      /* Hide the noisy parts of Streamlit's default top toolbar (deploy button,
-         status widget, decoration line) but KEEP the header container so the
-         sidebar collapse/expand control still has somewhere to anchor. */
-      [data-testid="stToolbar"],
-      [data-testid="stDecoration"],
-      [data-testid="stStatusWidget"] { display: none !important; }
-      [data-testid="stHeader"] { background: transparent !important; }
-
-      /* Ensure the sidebar can be reopened after the user collapses it. The
-         "show" control sits at the top-left when the sidebar is closed. */
-      [data-testid="stSidebarCollapsedControl"],
-      [data-testid="collapsedControl"],
-      button[kind="header"][aria-label*="sidebar" i],
-      button[aria-label="Open sidebar"],
-      button[aria-label*="open" i][aria-label*="sidebar" i] {
-        display: flex !important;
-        visibility: visible !important;
-        opacity: 1 !important;
-        z-index: 999 !important;
-      }
-
-      /* Sidebar visibility + width. Explicitly force display + min-width so
-         no later cascade can hide it. */
-      [data-testid="stSidebar"] {
-        display: flex !important;
-        visibility: visible !important;
-        width: 290px !important;
-        min-width: 290px !important;
-      }
-      [data-testid="stSidebar"] > div:first-child {
-        width: 290px !important;
-        min-width: 290px !important;
-        padding-top: 1.2rem;
-      }
-      [data-testid="stSidebar"] .stButton button {
-        text-align: left; justify-content: flex-start;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      }
-
-      /* Main content padding. IMPORTANT: scope only to the main column so we
-         don't accidentally cap the whole app's width or hide the sidebar.
-         Older selector `[data-testid="block-container"]` was too generic. */
-      [data-testid="stMain"] .block-container,
-      [data-testid="stMainBlockContainer"],
-      section.main > .block-container {
-        max-width: 920px;
-        padding-top: 2.2rem;
-        padding-bottom: 8rem;
-        padding-left: 32px;
-        padding-right: 32px;
-        margin-left: auto;
-        margin-right: auto;
-      }
-
-      /* Mobile fallback: let main content use full width on narrow screens. */
-      @media (max-width: 900px) {
-        [data-testid="stMain"] .block-container,
-        [data-testid="stMainBlockContainer"],
-        section.main > .block-container {
-          max-width: 100% !important;
-          padding-left: 14px !important;
-          padding-right: 14px !important;
-        }
-      }
-
       /* App brand inside sidebar. */
       .sb-brand { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 2px; }
       .sb-tagline { color: rgba(128,128,128,0.95); font-size: 12px; margin-bottom: 4px; }
@@ -169,9 +107,6 @@ st.markdown(
       .chip { display: inline-block; padding: 3px 9px; background: rgba(120,120,120,0.12); border: 1px solid rgba(120,120,120,0.22); border-radius: 999px; font-size: 11px; line-height: 1.4; margin-right: 4px; margin-bottom: 4px; }
       .chip.active { background: rgba(46,160,67,0.12); border-color: rgba(46,160,67,0.30); }
       .chip.muted  { color: rgba(128,128,128,0.95); }
-
-      /* Chat input rests cleanly at the bottom — no edge clip. */
-      [data-testid="stChatInput"] { padding-left: 4px; padding-right: 4px; }
 
       /* Make hr/divider lines softer. */
       hr { border-color: rgba(128,128,128,0.16) !important; }
