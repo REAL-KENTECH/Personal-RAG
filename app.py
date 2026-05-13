@@ -1714,63 +1714,123 @@ def retrieve(query: str) -> list:
 # Doc ingestion
 # =============================================================================
 
+def _embed_with_progress(chunks: list, embedder, status, label_prefix: str,
+                          batch_size: int = 32):
+    """Embed chunks in batches and surface per-batch progress to a Streamlit
+    st.status container. Returns the stacked numpy embedding matrix."""
+    total = len(chunks)
+    if total == 0:
+        import numpy as _np
+        return _np.zeros((0, 1), dtype=_np.float32)
+    if total <= batch_size:
+        status.update(label=f'{label_prefix} 임베딩 ({total}청크)')
+        return embedder.encode(
+            chunks, convert_to_numpy=True, normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+    import numpy as _np
+    parts = []
+    done = 0
+    bar = st.progress(0.0, text=f'{label_prefix} 임베딩 {done}/{total} 청크')
+    for i in range(0, total, batch_size):
+        batch = chunks[i:i + batch_size]
+        parts.append(embedder.encode(
+            batch, convert_to_numpy=True, normalize_embeddings=True,
+            show_progress_bar=False,
+        ))
+        done = min(i + batch_size, total)
+        bar.progress(done / total, text=f'{label_prefix} 임베딩 {done}/{total} 청크')
+    bar.empty()
+    return _np.vstack(parts)
+
+
 def ingest_files(files):
     """For each new file: parse (Docling for PDF) → chunk with page metadata
-    → embed → render page images (PDF) → save → register."""
+    → embed (batched, progress-reported) → optionally render page images
+    (only if multimodal is enabled, otherwise skipped to save time)
+    → save → register."""
     eid = st.session_state['embedder_model']
     size = st.session_state['chunk_size']
     overlap = st.session_state['chunk_overlap']
+    render_pages = bool(st.session_state.get('include_page_images'))
     existing_ids = {d['id'] for d in st.session_state['docs']}
     existing_names = {d['name'] for d in st.session_state['docs']}
     new_count = 0
 
-    for f in files:
-        if f.name in existing_names:
-            continue
-        parsed = parse_file(f)
-        raw = parsed['raw_text']
-        if not raw.strip():
-            st.warning(f'{f.name}: 추출된 텍스트가 없어 인덱스에서 제외합니다.')
-            continue
-        chunks, chunk_pages = chunk_elements(parsed['elements'], size, overlap)
-        if not chunks:
-            st.warning(f'{f.name}: 청크가 생성되지 않았습니다.')
-            continue
-        did = compute_doc_id(f.name, raw, size, overlap)
-        if did in existing_ids:
-            continue
-        cached = load_doc(eid, did)
-        if cached is not None:
-            doc = cached
-        else:
-            embedder = load_embedder(eid)
-            embs = embedder.encode(
-                chunks, convert_to_numpy=True, normalize_embeddings=True,
-                show_progress_bar=False,
+    with st.status(f'{len(files)}개 파일 인덱싱 시작', expanded=True) as status:
+        for f in files:
+            if f.name in existing_names:
+                status.update(label=f'{f.name}: 이미 등록됨, 건너뜀')
+                continue
+
+            status.update(label=f'{f.name}: 파싱 중...')
+            parsed = parse_file(f)
+            raw = parsed['raw_text']
+            if not raw.strip():
+                st.warning(f'{f.name}: 추출된 텍스트가 없어 인덱스에서 제외합니다.')
+                continue
+
+            status.update(label=f'{f.name}: 청크 분할 중...')
+            chunks, chunk_pages = chunk_elements(parsed['elements'], size, overlap)
+            if not chunks:
+                st.warning(f'{f.name}: 청크가 생성되지 않았습니다.')
+                continue
+
+            did = compute_doc_id(f.name, raw, size, overlap)
+            if did in existing_ids:
+                continue
+
+            cached = load_doc(eid, did)
+            if cached is not None:
+                status.update(label=f'{f.name}: 캐시에서 즉시 복원 ({len(cached["chunks"])} 청크)')
+                doc = cached
+            else:
+                # Load embedder lazily — the very first call also downloads the
+                # model weights (~470 MB for MiniLM, ~2.2 GB for BGE-M3).
+                status.update(label=f'{f.name}: 임베더 준비 중 (모델 로드)...')
+                embedder = load_embedder(eid)
+                embs = _embed_with_progress(
+                    chunks, embedder, status, label_prefix=f.name,
+                )
+
+                has_imgs = False
+                if render_pages and parsed['is_pdf'] and parsed['pdf_bytes']:
+                    status.update(label=f'{f.name}: 페이지 이미지 렌더 중 (멀티모달용)...')
+                    try:
+                        n_pages = render_pdf_pages_to_dir(
+                            parsed['pdf_bytes'], _pages_dir(eid, did)
+                        )
+                        has_imgs = n_pages > 0
+                    except Exception as e:
+                        st.warning(f'{f.name}: 페이지 이미지 렌더 실패 ({e}).')
+
+                status.update(label=f'{f.name}: 디스크 저장 중...')
+                doc = {
+                    'id': did, 'name': f.name, 'raw_text': raw,
+                    'chunks': chunks, 'chunk_pages': chunk_pages,
+                    'page_count': parsed['page_count'],
+                    'has_page_images': has_imgs,
+                    'is_pdf': parsed['is_pdf'],
+                    'embeddings': embs,
+                    'chunk_size': size, 'chunk_overlap': overlap,
+                }
+                save_doc(eid, doc)
+
+            st.session_state['docs'].append(doc)
+            existing_ids.add(did)
+            existing_names.add(doc['name'])
+            new_count += 1
+            status.update(label=f'{f.name}: 완료 ({len(doc["chunks"])} 청크)')
+
+        if new_count > 0:
+            status.update(
+                label=f'{new_count}개 새 문서 인덱싱 완료',
+                state='complete', expanded=False,
             )
-            has_imgs = False
-            if parsed['is_pdf'] and parsed['pdf_bytes']:
-                try:
-                    n_pages = render_pdf_pages_to_dir(
-                        parsed['pdf_bytes'], _pages_dir(eid, did)
-                    )
-                    has_imgs = n_pages > 0
-                except Exception as e:
-                    st.warning(f'{f.name}: 페이지 이미지 렌더 실패 ({e}). 멀티모달 기능 사용 시 제한됨.')
-            doc = {
-                'id': did, 'name': f.name, 'raw_text': raw,
-                'chunks': chunks, 'chunk_pages': chunk_pages,
-                'page_count': parsed['page_count'],
-                'has_page_images': has_imgs,
-                'is_pdf': parsed['is_pdf'],
-                'embeddings': embs,
-                'chunk_size': size, 'chunk_overlap': overlap,
-            }
-            save_doc(eid, doc)
-        st.session_state['docs'].append(doc)
-        existing_ids.add(did)
-        existing_names.add(doc['name'])
-        new_count += 1
+        else:
+            status.update(
+                label='새로 인덱싱된 문서 없음', state='complete', expanded=False,
+            )
     return new_count
 
 
@@ -2703,8 +2763,8 @@ def view_chat():
         # so the files immediately show up in the Documents tab too.
         added = 0
         if file_part:
-            with st.spinner(f'{len(file_part)}개 파일 인덱싱 중...'):
-                added = ingest_files(file_part)
+            # ingest_files() shows its own st.status with per-batch progress.
+            added = ingest_files(file_part)
             if added > 0:
                 try:
                     st.toast(
@@ -2741,8 +2801,8 @@ def view_docs():
         label_visibility='collapsed',
     )
     if uploaded:
-        with st.spinner(f'{len(uploaded)}개 파일 인덱싱 중...'):
-            added = ingest_files(uploaded)
+        # ingest_files() shows its own st.status with per-batch progress.
+        added = ingest_files(uploaded)
         if added > 0:
             st.success(f'{added}개 새 문서 인덱싱 완료')
             st.rerun()
