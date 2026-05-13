@@ -3426,6 +3426,16 @@ def agentic_chat_pass(client, params: dict, initial_retrieved: list,
     return msg.content or '', reasoning_acc, augmented
 
 
+def _record_response_model(model_id: str) -> None:
+    """Capture the model id the provider actually served the response from.
+    Useful for verifying that requests went to the model the user picked —
+    OpenAI chat completions often respond with a dated variant like
+    'gpt-5-2025-08-07', so seeing that next to the configured 'gpt-5'
+    confirms the routing without trusting the model's self-introduction."""
+    if model_id:
+        st.session_state['_last_response_model'] = str(model_id)
+
+
 def stream_chat(client, params: dict):
     """Stream response. Returns (full_text, reasoning_text).
 
@@ -3444,6 +3454,12 @@ def stream_chat(client, params: dict):
     try:
         stream = client.chat.completions.create(stream=True, **params)
         for chunk in stream:
+            # Some providers stamp the model id on every chunk; capture
+            # it once we see it.
+            cm = getattr(chunk, 'model', None)
+            if cm and not st.session_state.get('_stream_model_captured'):
+                _record_response_model(cm)
+                st.session_state['_stream_model_captured'] = True
             if not getattr(chunk, 'choices', None):
                 continue
             delta = chunk.choices[0].delta
@@ -3474,11 +3490,14 @@ def stream_chat(client, params: dict):
     except Exception:
         placeholder.empty()
         raise
+    finally:
+        st.session_state.pop('_stream_model_captured', None)
     return full_text, reasoning_text
 
 
 def non_stream_chat(client, params: dict):
     resp = client.chat.completions.create(**params)
+    _record_response_model(getattr(resp, 'model', None))
     choice = resp.choices[0]
     full_text = choice.message.content or ''
     reasoning = ''
@@ -4077,6 +4096,13 @@ with st.sidebar:
     prov_short = st.session_state.get('provider', '')
     if prov_short:
         st.caption(f"공급자: `{prov_short}`")
+    # If the provider's last response stamped a model id, surface it so the
+    # user can verify the request actually went where they expected (LLMs
+    # sometimes misidentify themselves; this header doesn't lie).
+    actual_model = st.session_state.get('_last_response_model')
+    if actual_model and actual_model != st.session_state.get('model'):
+        am_short = actual_model if len(actual_model) <= 36 else actual_model[:33] + '...'
+        st.caption(f"직전 응답 모델: `{am_short}`")
     if st.session_state.get('general_chat_mode'):
         st.caption(
             '모드: 일반 대화 (RAG 끔)'
