@@ -905,14 +905,24 @@ def log_turn_structured(user_input: str, response_text: str, reasoning: str,
 
 
 def auto_title_session() -> str:
-    """LLM-generate a short Korean title from the first turn."""
+    """LLM-generate a short Korean title from the first turn.
+
+    Falls back to a trimmed version of the user's first question when the LLM
+    call fails or returns empty content (common with reasoning-style models
+    like gpt-5 / o-series that can consume the whole max_tokens budget on
+    internal thinking before emitting any visible output).
+    """
     if not st.session_state['user_inputs'] or not st.session_state['generated_responses']:
         return ''
     user_msg = st.session_state['user_inputs'][0][:300]
     asst_msg = st.session_state['generated_responses'][0][:300]
+
+    # Always-available fallback derived from the user's question itself.
+    fallback = ' '.join((user_msg or '').split())[:16] or '새 대화'
+
     prompt = (
         '다음 대화 첫 턴을 보고 8글자 내외의 간결한 한국어 제목을 만드세요. '
-        '큰따옴표/마침표/이모지 없이 제목만 출력하세요.\n\n'
+        '큰따옴표 / 마침표 / 이모지 없이 제목만 한 줄로 출력하세요.\n\n'
         f'사용자: {user_msg}\n어시스턴트: {asst_msg}\n\n제목:'
     )
     try:
@@ -920,18 +930,30 @@ def auto_title_session() -> str:
         tparams = _build_completion_params(
             model=st.session_state['model'],
             messages=[{'role': 'user', 'content': prompt}],
-            max_tokens=80,
+            # Generous budget — reasoning models can spend hundreds of tokens
+            # thinking before producing the 8-character title.
+            max_tokens=400,
             temperature=0.3,
             extra_body=_thinking_off_extra_body(),
         )
         resp = client.chat.completions.create(**tparams)
         title = (resp.choices[0].message.content or '').strip()
+        # If the model returned reasoning then the title on a final line,
+        # keep only the last non-empty line.
+        if '\n' in title:
+            lines = [ln.strip() for ln in title.splitlines() if ln.strip()]
+            if lines:
+                title = lines[-1]
         title = title.strip('"').strip("'").strip('「').strip('」').strip()
+        # Strip any "제목:" prefix the model might echo.
+        for prefix in ('제목:', '제목 :', 'Title:'):
+            if title.startswith(prefix):
+                title = title[len(prefix):].strip()
         if len(title) > 30:
             title = title[:30]
-        return title or '(제목 없음)'
+        return title or fallback
     except Exception:
-        return ''
+        return fallback
 
 
 @st.cache_data(show_spinner=False)
