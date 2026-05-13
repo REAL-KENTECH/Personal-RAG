@@ -1273,6 +1273,129 @@ def parse_pdf_pypdf(pdf_bytes: bytes) -> dict:
     return {'elements': elements, 'page_count': len(reader.pages), 'ok': True}
 
 
+def parse_csv_bytes(data: bytes, file_name: str = '') -> dict:
+    """Parse CSV. Each row becomes one element formatted as
+    'col1: val1 | col2: val2 | ...' so the LLM sees field-name context
+    around each value, not just numbers in isolation. Also includes a
+    header-summary element so semantic search can match queries like
+    "what columns does this file have"."""
+    import csv as _csv
+    import io as _io
+
+    # Best-effort decoding: try UTF-8 (with BOM), fall back to CP949
+    # which is what Excel saves CSV as on Korean Windows.
+    for enc in ('utf-8-sig', 'utf-8', 'cp949', 'euc-kr', 'latin-1'):
+        try:
+            text = data.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        return {'elements': [], 'page_count': 0, 'ok': False}
+
+    # Sniff delimiter — fall back to comma if sniffing fails.
+    sample = text[:4096]
+    try:
+        dialect = _csv.Sniffer().sniff(sample, delimiters=',;\t|')
+    except _csv.Error:
+        class _Default(_csv.Dialect):
+            delimiter = ','
+            quotechar = '"'
+            doublequote = True
+            skipinitialspace = True
+            lineterminator = '\n'
+            quoting = _csv.QUOTE_MINIMAL
+        dialect = _Default
+
+    reader = _csv.reader(_io.StringIO(text), dialect)
+    rows = list(reader)
+    if not rows:
+        return {'elements': [], 'page_count': 0, 'ok': True}
+
+    header = [(c or '').strip() for c in rows[0]]
+    data_rows = rows[1:]
+    elements = []
+
+    # 1) Summary element — column names + row count.
+    summary = (
+        f"[CSV 요약] 파일: {file_name or 'csv'}, "
+        f"열 {len(header)}개, 행 {len(data_rows)}개. "
+        f"열 이름: {', '.join(c for c in header if c)}."
+    )
+    elements.append({'text': summary, 'page': None})
+
+    # 2) Per-row elements — formatted as "header: value | header: value".
+    for i, row in enumerate(data_rows, start=1):
+        cells = []
+        for h, v in zip(header, row):
+            v = (v or '').strip()
+            if not v:
+                continue
+            if h:
+                cells.append(f'{h}: {v}')
+            else:
+                cells.append(v)
+        if cells:
+            elements.append({
+                'text': f'행 {i}: ' + ' | '.join(cells),
+                'page': None,
+            })
+
+    return {'elements': elements, 'page_count': 0, 'ok': True}
+
+
+def parse_hwpx_bytes(data: bytes) -> dict:
+    """Parse HWPX (Hancom Office XML). HWPX is a ZIP archive containing
+    section XML files under Contents/. We pull <hp:t> (text run) elements
+    from each section in order and treat each section as a 'page' so the
+    citation system can still surface a section number."""
+    import io as _io
+    import zipfile as _zip
+    from xml.etree import ElementTree as _ET
+
+    try:
+        zf = _zip.ZipFile(_io.BytesIO(data))
+    except _zip.BadZipFile:
+        return {'elements': [], 'page_count': 0, 'ok': False}
+
+    section_names = sorted(
+        (n for n in zf.namelist()
+         if n.startswith('Contents/section') and n.endswith('.xml')),
+        key=lambda n: n,
+    )
+    if not section_names:
+        zf.close()
+        return {'elements': [], 'page_count': 0, 'ok': False}
+
+    elements = []
+    # HWPX uses the 'hp' namespace; strip namespaces so we don't have to
+    # bind them — just match local tag names.
+    def _local(tag: str) -> str:
+        return tag.split('}', 1)[1] if '}' in tag else tag
+
+    for section_idx, name in enumerate(section_names, start=1):
+        try:
+            raw = zf.read(name)
+            root = _ET.fromstring(raw)
+        except Exception:
+            continue
+        # Each <p> (paragraph) becomes one element. Within a paragraph we
+        # concatenate the text of all <t> (text run) descendants.
+        for p in root.iter():
+            if _local(p.tag) != 'p':
+                continue
+            buf = []
+            for t in p.iter():
+                if _local(t.tag) == 't' and t.text:
+                    buf.append(t.text)
+            joined = ''.join(buf).strip()
+            if joined:
+                elements.append({'text': joined, 'page': section_idx})
+
+    zf.close()
+    return {'elements': elements, 'page_count': len(section_names), 'ok': True}
+
+
 def parse_file(file) -> dict:
     """Returns a dict: {raw_text, elements, page_count, is_pdf, pdf_bytes}.
 
@@ -1299,6 +1422,48 @@ def parse_file(file) -> dict:
             'is_pdf': True,
             'pdf_bytes': data,
         }
+    if name.endswith('.csv'):
+        data = _read_bytes(file)
+        parsed = parse_csv_bytes(data, file_name=file.name)
+        if not parsed['ok']:
+            st.error(f'CSV 디코딩 실패 ({file.name}): 인코딩이 UTF-8/CP949 가 아닌 듯합니다.')
+            return {'raw_text': '', 'elements': [], 'page_count': 0,
+                    'is_pdf': False, 'pdf_bytes': None}
+        raw = '\n'.join(e['text'] for e in parsed['elements'])
+        return {
+            'raw_text': raw,
+            'elements': parsed['elements'],
+            'page_count': 0,
+            'is_pdf': False,
+            'pdf_bytes': None,
+        }
+    if name.endswith('.hwpx'):
+        data = _read_bytes(file)
+        parsed = parse_hwpx_bytes(data)
+        if not parsed['ok']:
+            st.error(
+                f'HWPX 파싱 실패 ({file.name}): 손상된 파일이거나 보안 처리된 '
+                f'HWPX 일 수 있습니다. 한컴오피스에서 다시 저장하거나 PDF 로 '
+                f'변환해 보세요.'
+            )
+            return {'raw_text': '', 'elements': [], 'page_count': 0,
+                    'is_pdf': False, 'pdf_bytes': None}
+        raw = '\n\n'.join(e['text'] for e in parsed['elements'])
+        return {
+            'raw_text': raw,
+            'elements': parsed['elements'],
+            'page_count': parsed['page_count'],  # section count, used like "page"
+            'is_pdf': False,
+            'pdf_bytes': None,
+        }
+    # Reject .hwp (binary) explicitly with a helpful message — different format.
+    if name.endswith('.hwp'):
+        st.error(
+            f'HWP (구버전 바이너리) 는 직접 지원하지 않습니다 ({file.name}). '
+            f'한컴오피스에서 HWPX 또는 PDF 로 다시 저장한 뒤 업로드해 주세요.'
+        )
+        return {'raw_text': '', 'elements': [], 'page_count': 0,
+                'is_pdf': False, 'pdf_bytes': None}
     try:
         text = file.read().decode('utf-8', errors='ignore')
     except Exception as e:
@@ -3412,7 +3577,7 @@ def view_chat():
         submitted = st.chat_input(
             _placeholder,
             accept_file='multiple',
-            file_type=['txt', 'md', 'pdf'],
+            file_type=['txt', 'md', 'pdf', 'csv', 'hwpx'],
         )
     except TypeError:
         submitted = st.chat_input(_placeholder)
@@ -3466,7 +3631,7 @@ def view_docs():
     )
     uploaded = st.file_uploader(
         ' ',
-        type=['txt', 'md', 'pdf'],
+        type=['txt', 'md', 'pdf', 'csv', 'hwpx'],
         accept_multiple_files=True,
         label_visibility='collapsed',
     )
