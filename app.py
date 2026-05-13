@@ -2695,18 +2695,23 @@ def _build_completion_params(
             out['max_tokens'] = budget
 
     # Sampling param compatibility per provider.
-    # - OpenAI gpt-5/o-series: rejects ANY non-default sampling params
-    # - Anthropic (Claude 4.x via OpenAI compat): rejects top_p, presence_penalty
+    # - OpenAI gpt-5/o-series: rejects ANY non-default sampling param.
+    # - Anthropic (Claude 4.x via OpenAI compat): rejects temperature,
+    #   top_p, and presence_penalty on most current models. Claude moved
+    #   to model-managed sampling and returns
+    #     'temperature is deprecated for this model.'
+    #   when any of these are sent. Safest to omit all three; the
+    #   default sampling produces good output.
     is_anthropic = _is_anthropic_endpoint()
     openai_strict = is_openai and (
         _is_openai_reasoning_model(model) or _is_openai_gpt5_family(model)
     )
-    if not openai_strict:
+    if not openai_strict and not is_anthropic:
         if temperature is not None:
             out['temperature'] = float(temperature)
-        if top_p is not None and not is_anthropic:
+        if top_p is not None:
             out['top_p'] = float(top_p)
-        if presence_penalty is not None and not is_anthropic:
+        if presence_penalty is not None:
             out['presence_penalty'] = float(presence_penalty)
 
     # extra_body — strip provider-incompatible fields as a safety net.
