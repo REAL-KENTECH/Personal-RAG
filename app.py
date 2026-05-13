@@ -694,6 +694,107 @@ def save_doc(embedder_id: str, doc: dict) -> None:
     np.save(d / 'embeddings.npy', doc['embeddings'])
 
 
+# ---------- pgvector dual-write (optional) ----------
+# Maps the embedder model id we use locally to the short name we store in
+# doc_chunks.embedder and the vector column that holds the actual values.
+_EMBEDDER_TABLE_MAP = {
+    'BAAI/bge-m3': ('bge-m3', 'embedding_bgem3', 1024),
+    'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2':
+        ('paraphrase-multilingual-MiniLM-L12-v2', 'embedding_minilm', 384),
+}
+
+
+def _pgvector_upsert_doc(embedder_id: str, doc: dict) -> None:
+    """Best-effort: send every chunk of `doc` into public.doc_chunks so the
+    embeddings survive container restarts and can be queried at the DB layer
+    when pgvector retrieval is enabled. No-op when Supabase isn't wired up
+    or when the embedder isn't one we have a column for.
+
+    Tracks success/failure counters in session_state (separate from the
+    generic logging counters) so the cache tab can surface state. Never
+    raises — local on-disk numpy arrays remain the source of truth."""
+    client = _supabase_client()
+    if client is None:
+        return
+    mapping = _EMBEDDER_TABLE_MAP.get(embedder_id)
+    if mapping is None:
+        return
+    short_name, vec_col, _dim = mapping
+
+    user_id = st.session_state.get('user_id', '_local')
+    chunks = doc.get('chunks') or []
+    embs = doc.get('embeddings')
+    pages = doc.get('chunk_pages') or [[] for _ in chunks]
+    if embs is None or len(embs) != len(chunks):
+        return
+
+    rows = []
+    for i, ch in enumerate(chunks):
+        v = embs[i]
+        # supabase-py serializes lists as pgvector literals automatically;
+        # numpy.ndarray needs .tolist() first.
+        if hasattr(v, 'tolist'):
+            v = v.tolist()
+        rows.append({
+            'user_id': user_id,
+            'doc_id': doc['id'],
+            'doc_name': doc.get('name', ''),
+            'chunk_idx': i,
+            'text': ch,
+            'pages': pages[i] if i < len(pages) else [],
+            'embedder': short_name,
+            vec_col: v,
+        })
+    if not rows:
+        return
+
+    # Batch the upsert to keep individual requests under a few hundred KB
+    # — large PDFs can have hundreds of chunks.
+    BATCH = 100
+    for start in range(0, len(rows), BATCH):
+        batch = rows[start:start + BATCH]
+        st.session_state['_pgv_attempts'] = (
+            st.session_state.get('_pgv_attempts', 0) + len(batch)
+        )
+        try:
+            (client.table('doc_chunks')
+                .upsert(
+                    _scrub_for_postgres(batch),
+                    on_conflict='user_id,doc_id,chunk_idx,embedder',
+                )
+                .execute())
+            st.session_state['_pgv_successes'] = (
+                st.session_state.get('_pgv_successes', 0) + len(batch)
+            )
+        except Exception as e:
+            st.session_state['_pgv_failures'] = (
+                st.session_state.get('_pgv_failures', 0) + len(batch)
+            )
+            st.session_state['_pgv_last_err'] = (
+                f'doc_chunks batch: {type(e).__name__}: {str(e)[:600]}'
+            )
+            # If the very first batch fails (e.g. table missing), don't
+            # keep hammering — let the rest abort silently.
+            return
+
+
+def _pgvector_delete_doc(doc_id: str) -> None:
+    """Best-effort cleanup: when a user deletes a document locally, also
+    remove its chunks from pgvector so the two stores stay aligned."""
+    client = _supabase_client()
+    if client is None:
+        return
+    user_id = st.session_state.get('user_id', '_local')
+    try:
+        (client.table('doc_chunks')
+            .delete()
+            .eq('user_id', user_id)
+            .eq('doc_id', doc_id)
+            .execute())
+    except Exception:
+        pass
+
+
 def load_doc(embedder_id: str, doc_id: str):
     d = _embedder_dir(embedder_id) / doc_id
     mp = d / 'meta.json'
@@ -2005,6 +2106,10 @@ def ingest_files(files):
             if cached is not None:
                 status.update(label=f'{f.name}: 캐시에서 즉시 복원 ({len(cached["chunks"])} 청크)')
                 doc = cached
+                # Cached restore: pgvector copy may not exist on this Cloud
+                # container yet (different deploy / different region). Upsert
+                # is idempotent so retrying is cheap.
+                _pgvector_upsert_doc(eid, doc)
             else:
                 # Load embedder lazily — the very first call also downloads the
                 # model weights (~470 MB for MiniLM, ~2.2 GB for BGE-M3).
@@ -2036,6 +2141,9 @@ def ingest_files(files):
                     'chunk_size': size, 'chunk_overlap': overlap,
                 }
                 save_doc(eid, doc)
+                # Also push chunk embeddings to pgvector if Supabase is
+                # configured — no-op otherwise, never blocks ingestion.
+                _pgvector_upsert_doc(eid, doc)
 
             st.session_state['docs'].append(doc)
             existing_ids.add(did)
@@ -2080,6 +2188,7 @@ def remove_doc(doc_id: str):
         '',
     )
     delete_saved_doc(eid, doc_id)
+    _pgvector_delete_doc(doc_id)
     st.session_state['docs'] = [d for d in st.session_state['docs'] if d['id'] != doc_id]
     _log_event('doc_delete', {
         'doc_id': doc_id, 'name': doc_name, 'embedder': eid,
@@ -3538,6 +3647,31 @@ def view_cache():
                     st.markdown(
                         '**원인: 키 권한 문제.** Settings → Secrets 의 `SUPABASE_KEY` 가 anon public 키인지 확인.'
                     )
+
+        # ----- pgvector upsert status (chunk embeddings) -----
+        pgv_attempts = st.session_state.get('_pgv_attempts', 0)
+        pgv_successes = st.session_state.get('_pgv_successes', 0)
+        pgv_failures = st.session_state.get('_pgv_failures', 0)
+        pgv_last_err = st.session_state.get('_pgv_last_err')
+        if pgv_attempts > 0:
+            if pgv_failures == 0:
+                st.success(
+                    f'pgvector: 이 세션에서 청크 임베딩 {pgv_successes}/{pgv_attempts} 건 영속화 성공.'
+                )
+            else:
+                st.error(
+                    f'pgvector: 청크 영속화 {pgv_failures}/{pgv_attempts} 실패. '
+                    '`db_schema_pgvector.sql` 을 Supabase SQL Editor 에서 실행했는지 확인하세요.'
+                )
+                if pgv_last_err:
+                    with st.expander('마지막 pgvector 에러', expanded=False):
+                        st.code(pgv_last_err)
+        else:
+            st.info(
+                'pgvector: 이 세션 인덱싱 없음. 문서를 업로드하면 청크 임베딩이 '
+                'Supabase 의 `doc_chunks` 테이블에도 자동 저장됩니다 '
+                '(스키마 적용 필요: `db_schema_pgvector.sql`).'
+            )
     else:
         if _is_streamlit_cloud():
             st.warning(

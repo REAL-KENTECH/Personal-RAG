@@ -168,6 +168,21 @@ git add -A && git commit -m "..." && git push
 
 설정 안 하면 앱은 그대로 동작하되 로컬 JSONL 만 씁니다 (개발 / 단일 사용자 OK, Cloud 배포 비추).
 
+### pgvector 추가 — 청크 임베딩도 영속화 (선택, 강력 추천)
+
+위 기본 로깅에 더해 **문서 청크 임베딩까지** 영속화하려면 한 번 더 SQL 실행. 그러면 사용자가 올린 PDF 의 임베딩이 컨테이너 재시작 후에도 살아남고, pgvector 의 HNSW 인덱스로 더 큰 규모의 ANN 검색이 가능합니다.
+
+| 단계 | 작업 |
+|---|---|
+| 1 | Supabase **SQL Editor** → 본 레포의 `db_schema_pgvector.sql` 내용 통째로 붙여넣고 **Run** |
+| 2 | 앱에서 문서 업로드 — 캐시 탭 가서 `pgvector: 청크 임베딩 N/N 건 영속화 성공` 초록 메시지 확인 |
+
+내부적으로 어떻게 동작하는지:
+- `vector` 확장 활성화 + `public.doc_chunks` 테이블 생성 (MiniLM 384 / BGE-M3 1024 두 차원 모두 지원)
+- HNSW 인덱스로 cosine k-NN 빠르게
+- 인덱싱 시 자동 dual-write (로컬 numpy + pgvector 동시 저장)
+- 검색은 아직 로컬 numpy 가 기본 (Phase 2b 에서 토글로 pgvector 검색 전환 예정)
+
 ## 보안 체크리스트
 
 - [x] `.env` / `.streamlit/secrets.toml` 은 `.gitignore`에 포함됨
