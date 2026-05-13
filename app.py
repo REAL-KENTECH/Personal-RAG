@@ -3910,6 +3910,9 @@ with st.sidebar:
     if len(model_short) > 32:
         model_short = model_short[:29] + '...'
     st.caption(f"모델: `{model_short}`")
+    prov_short = st.session_state.get('provider', '')
+    if prov_short:
+        st.caption(f"공급자: `{prov_short}`")
     if st.session_state.get('general_chat_mode'):
         st.caption(
             '모드: 일반 대화 (RAG 끔)'
