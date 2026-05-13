@@ -4289,256 +4289,329 @@ def view_docs():
 # =============================================================================
 
 def view_settings():
-    left, right = st.columns(2, gap='large')
+    _section(
+        '설정',
+        '모델·검색·웹·응답을 카테고리별로 정리. 변경은 즉시 저장됩니다.',
+    )
 
-    # ----- 모델 -----
-    with left:
-        _section('모델')
+    # ----- Top status snapshot -----
+    active_p = st.session_state.get('provider', 'Hugging Face Router')
+    model_short = (st.session_state.get('model') or '—')
+    if len(model_short) > 30:
+        model_short = model_short[:27] + '...'
+    embedder_label = {
+        'BAAI/bge-m3': 'BGE-M3',
+        'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2': 'MiniLM',
+    }.get(st.session_state.get('embedder_model', ''), '—')
+    has_key = bool(_active_api_key())
+    with st.container(border=True):
+        m = st.columns(4)
+        m[0].metric('공급자', active_p)
+        m[1].metric('모델', model_short)
+        m[2].metric('임베더', embedder_label)
+        m[3].metric('API 키', '설정됨' if has_key else '없음')
 
-        current_provider = st.session_state.get('provider', PROVIDER_NAMES[0])
-        if current_provider not in PROVIDER_NAMES:
-            current_provider = PROVIDER_NAMES[0]
-        new_provider = st.selectbox(
-            '공급자', PROVIDER_NAMES,
-            index=PROVIDER_NAMES.index(current_provider),
-            help='프리셋을 선택하면 엔드포인트 주소·기본 모델·환경변수에서 API 키를 자동으로 채웁니다.',
-        )
-        if new_provider != current_provider:
-            cfg = PROVIDERS[new_provider]
-            if cfg['base_url']:
-                st.session_state['base_url'] = cfg['base_url']
-            if cfg['default_model']:
-                st.session_state['model'] = cfg['default_model']
-            st.session_state['provider'] = new_provider
-            st.rerun()
-        else:
-            st.session_state['provider'] = new_provider
+    # ----- Tabbed sections -----
+    tab_llm, tab_search, tab_web, tab_response, tab_advanced = st.tabs(
+        ['LLM 공급자', 'RAG 검색', '웹 검색', '응답 / 멀티모달', '고급']
+    )
 
-        model_picker('모델 이름', key_prefix='settings')
+    # ============== LLM ==============
+    with tab_llm:
+        with st.container(border=True):
+            st.markdown('##### 공급자 선택')
+            current_provider = st.session_state.get('provider', PROVIDER_NAMES[0])
+            if current_provider not in PROVIDER_NAMES:
+                current_provider = PROVIDER_NAMES[0]
+            new_provider = st.selectbox(
+                '공급자', PROVIDER_NAMES,
+                index=PROVIDER_NAMES.index(current_provider),
+                help='프리셋을 선택하면 엔드포인트 주소·기본 모델·환경변수에서 API 키를 자동으로 채웁니다.',
+                label_visibility='collapsed',
+            )
+            if new_provider != current_provider:
+                cfg = PROVIDERS[new_provider]
+                if cfg['base_url']:
+                    st.session_state['base_url'] = cfg['base_url']
+                if cfg['default_model']:
+                    st.session_state['model'] = cfg['default_model']
+                st.session_state['provider'] = new_provider
+                st.rerun()
+            else:
+                st.session_state['provider'] = new_provider
+            model_picker('모델', key_prefix='settings')
 
-        # Per-provider API keys — all four shown so user can pre-fill once
-        # and switch providers without losing the others. The "(사용 중)"
-        # label marks which one is sent to the LLM for the current provider.
-        active_p = st.session_state.get('provider', 'Hugging Face Router')
+        # API keys — collapsed into one card with a master "API 키" header.
+        with st.container(border=True):
+            st.markdown('##### API 키')
+            st.caption(
+                '공급자별로 따로 저장됩니다. "(사용 중)" 마크가 현재 공급자의 키.'
+            )
 
-        def _key_label(name, owner):
-            return f'{name} (사용 중)' if owner == active_p else name
+            def _key_label(name, owner):
+                return f'{name} (사용 중)' if owner == active_p else name
 
-        st.markdown('**API 키 (공급자별로 따로 저장)**')
-        st.session_state['hf_api_key'] = st.text_input(
-            _key_label('Hugging Face 토큰', 'Hugging Face Router'),
-            st.session_state.get('hf_api_key', ''), type='password',
-            help='Hugging Face Router (Gemma / DeepSeek / Qwen 등) 사용 시 필요. '
-            '권한: "Make calls to Inference Providers" 필수. '
-            'Llama/Gemma 같이 gated 모델 쓰면 해당 모델의 gated 읽기 권한도 추가. '
-            'fine-grained 토큰 권장 (https://huggingface.co/settings/tokens). '
-            '환경변수 HF_TOKEN 으로도 자동 로드됨.',
-        )
-        st.session_state['openai_api_key'] = st.text_input(
-            _key_label('OpenAI API 키', 'OpenAI'),
-            st.session_state.get('openai_api_key', ''), type='password',
-            help='OpenAI (gpt-4o / gpt-5 / o3 등) 사용 시 필요. '
-            '환경변수 OPENAI_API_KEY 으로도 자동 로드됨.',
-        )
-        st.session_state['anthropic_api_key'] = st.text_input(
-            _key_label('Anthropic API 키', 'Anthropic (Claude)'),
-            st.session_state.get('anthropic_api_key', ''), type='password',
-            help='Claude (claude-opus / claude-sonnet / claude-haiku) 사용 시 필요. '
-            '발급: https://console.anthropic.com/settings/keys. '
-            '환경변수 ANTHROPIC_API_KEY 으로도 자동 로드됨.',
-        )
-        st.session_state['fireworks_api_key'] = st.text_input(
-            _key_label('Fireworks API 키', 'Fireworks AI'),
-            st.session_state.get('fireworks_api_key', ''), type='password',
-            help='Fireworks AI (오픈모델 빠른 추론 서비스, Llama / Qwen / DeepSeek 등) 사용 시 필요. '
-            '발급: https://fireworks.ai/account/api-keys. '
-            '환경변수 FIREWORKS_API_KEY 으로도 자동 로드됨.',
-        )
-        st.session_state['dashscope_api_key'] = st.text_input(
-            _key_label('DashScope API 키', 'DashScope (Qwen)'),
-            st.session_state.get('dashscope_api_key', ''), type='password',
-            help='Alibaba DashScope (Qwen 공식 API) 사용 시 필요. '
-            '환경변수 DASHSCOPE_API_KEY 으로도 자동 로드됨.',
-        )
-        st.session_state['custom_api_key'] = st.text_input(
-            _key_label('Custom / vLLM 키', 'vLLM / local')
-            if active_p in ('vLLM / local', 'Custom')
-            else 'Custom / vLLM 키',
-            st.session_state.get('custom_api_key', ''), type='password',
-            help='vLLM 등 셀프 호스팅 / 직접 지정한 OpenAI-호환 엔드포인트용.',
-        )
-        st.session_state['stream'] = st.checkbox(
-            '스트리밍 응답', value=st.session_state['stream'],
-            help='응답을 토큰 단위로 실시간 표시.',
-        )
-        st.session_state['enable_thinking'] = st.checkbox(
-            '추론 모드 사용', value=st.session_state['enable_thinking'],
-            help='지원 모델(예: Qwen3, Gemma 4)에서 추론 과정을 분리해서 보여줍니다.',
-        )
+            kc1, kc2 = st.columns(2)
+            with kc1:
+                st.session_state['hf_api_key'] = st.text_input(
+                    _key_label('Hugging Face', 'Hugging Face Router'),
+                    st.session_state.get('hf_api_key', ''), type='password',
+                    placeholder='hf_...',
+                    help='HF Inference Router (Gemma / DeepSeek / Qwen 등). '
+                    'fine-grained 토큰 권장: https://huggingface.co/settings/tokens',
+                )
+                st.session_state['openai_api_key'] = st.text_input(
+                    _key_label('OpenAI', 'OpenAI'),
+                    st.session_state.get('openai_api_key', ''), type='password',
+                    placeholder='sk-...',
+                    help='gpt-4o / gpt-5 / o3 등. https://platform.openai.com/api-keys',
+                )
+                st.session_state['anthropic_api_key'] = st.text_input(
+                    _key_label('Anthropic (Claude)', 'Anthropic (Claude)'),
+                    st.session_state.get('anthropic_api_key', ''), type='password',
+                    placeholder='sk-ant-...',
+                    help='Claude 4.x. https://console.anthropic.com/settings/keys',
+                )
+            with kc2:
+                st.session_state['fireworks_api_key'] = st.text_input(
+                    _key_label('Fireworks AI', 'Fireworks AI'),
+                    st.session_state.get('fireworks_api_key', ''), type='password',
+                    placeholder='fw_...',
+                    help='오픈모델 빠른 추론. https://fireworks.ai/account/api-keys',
+                )
+                st.session_state['dashscope_api_key'] = st.text_input(
+                    _key_label('DashScope (Qwen)', 'DashScope (Qwen)'),
+                    st.session_state.get('dashscope_api_key', ''), type='password',
+                    placeholder='sk-...',
+                    help='Qwen 공식 API.',
+                )
+                st.session_state['custom_api_key'] = st.text_input(
+                    _key_label('Custom / vLLM', 'vLLM / local')
+                    if active_p in ('vLLM / local', 'Custom')
+                    else 'Custom / vLLM',
+                    st.session_state.get('custom_api_key', ''), type='password',
+                    placeholder='(self-host endpoint key)',
+                    help='vLLM 등 셀프 호스팅 / Custom OpenAI-호환 endpoint.',
+                )
 
-        with st.expander('고급 모델 설정'):
+    # ============== RAG 검색 ==============
+    with tab_search:
+        # Mode + embedder
+        with st.container(border=True):
+            st.markdown('##### 동작 모드')
+            st.session_state['general_chat_mode'] = st.checkbox(
+                '일반 대화 모드 (RAG / 웹 검색 끔)',
+                value=st.session_state['general_chat_mode'],
+                help='업로드 문서·웹 검색을 모두 건너뛰고 LLM 본연 지식으로 답합니다.',
+            )
+            prev_embedder = st.session_state['embedder_model']
+            emb_labels = {
+                'BAAI/bge-m3': 'BGE-M3 (한국어 강함, 2.2GB)',
+                'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2':
+                    'MiniLM 다국어 (가벼움, 470MB)',
+            }
+            emb_idx = (
+                EMBEDDER_CHOICES.index(st.session_state['embedder_model'])
+                if st.session_state['embedder_model'] in EMBEDDER_CHOICES else 0
+            )
+            st.session_state['embedder_model'] = st.selectbox(
+                '임베딩 모델', EMBEDDER_CHOICES,
+                index=emb_idx,
+                format_func=lambda x: emb_labels.get(x, x),
+                help='문서·질문을 벡터로 변환하는 모델.',
+            )
+            if st.session_state['embedder_model'] != prev_embedder:
+                st.session_state['_loaded_for_embedder'] = None
+                load_all_for_current_embedder()
+                st.rerun()
+
+        # Retrieval pipeline
+        with st.container(border=True):
+            st.markdown('##### 검색 파이프라인')
+            mode_labels = {'hybrid': '하이브리드 (권장)',
+                           'dense': '의미 기반만', 'bm25': '키워드만'}
+            st.session_state['retrieval_mode'] = st.radio(
+                '검색 방식',
+                ['hybrid', 'dense', 'bm25'],
+                index=['hybrid', 'dense', 'bm25'].index(
+                    st.session_state['retrieval_mode']
+                ),
+                horizontal=True,
+                format_func=lambda x: mode_labels[x],
+            )
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                st.session_state['use_reranker'] = st.checkbox(
+                    '재정렬 모델 사용 (Cross-encoder)',
+                    value=st.session_state['use_reranker'],
+                    help='정확도 향상, 응답 약간 느려짐.',
+                )
+                st.session_state['use_contextual_rewrite'] = st.checkbox(
+                    '이어지는 질문 자동 보완',
+                    value=st.session_state['use_contextual_rewrite'],
+                    help='이전 대화 맥락으로 self-contained 질문 재작성.',
+                )
+                st.session_state['per_doc_balance'] = st.checkbox(
+                    '여러 문서 균형 검색',
+                    value=st.session_state['per_doc_balance'],
+                    help='상위 결과가 한 문서에 쏠리지 않게 강제.',
+                )
+                st.session_state['comparison_autodetect'] = st.checkbox(
+                    '비교 질문 자동 감지',
+                    value=st.session_state['comparison_autodetect'],
+                )
+            with cc2:
+                _pgv_available = _supabase_client() is not None
+                st.session_state['use_pgvector_search'] = st.checkbox(
+                    'pgvector 의미 검색 (Supabase)',
+                    value=st.session_state['use_pgvector_search'],
+                    help='Supabase pgvector 로 dense 검색. 미연결 시 자동 폴백.',
+                    disabled=not _pgv_available,
+                )
+                if not _pgv_available:
+                    st.caption('Supabase 미연동 — 비활성')
+                st.session_state['use_agentic_search'] = st.checkbox(
+                    '에이전트 검색 (LLM 추가 검색)',
+                    value=st.session_state['use_agentic_search'],
+                    help='LLM 이 도구 호출로 추가 검색 발행. function calling 지원 모델 필요.',
+                )
+                if st.session_state['use_agentic_search']:
+                    st.session_state['agentic_max_iters'] = st.slider(
+                        '최대 라운드', 1, 5,
+                        int(st.session_state.get('agentic_max_iters', 3)),
+                    )
+
+    # ============== 웹 ==============
+    with tab_web:
+        with st.container(border=True):
+            st.markdown('##### 실시간 웹 검색')
+            st.caption(
+                '질문 시 웹 검색 결과를 컨텍스트에 함께 포함. DuckDuckGo 는 API 키 불필요.'
+            )
+            st.session_state['web_enabled'] = st.checkbox(
+                '웹 검색 사용',
+                value=st.session_state['web_enabled'],
+            )
+            if st.session_state['web_enabled']:
+                wp_labels = {
+                    'duckduckgo': 'DuckDuckGo (키 불필요)',
+                    'tavily': 'Tavily (LLM 최적화, 키 필요)',
+                    'brave': 'Brave (키 필요)',
+                }
+                wc1, wc2 = st.columns(2)
+                with wc1:
+                    st.session_state['web_provider'] = st.selectbox(
+                        '검색 제공자', ['duckduckgo', 'tavily', 'brave'],
+                        index=['duckduckgo', 'tavily', 'brave'].index(
+                            st.session_state['web_provider']
+                        ),
+                        format_func=lambda x: wp_labels[x],
+                    )
+                with wc2:
+                    st.session_state['web_top_n'] = st.number_input(
+                        '결과 수', 1, 20, int(st.session_state['web_top_n']),
+                    )
+                if st.session_state['web_provider'] == 'tavily':
+                    st.session_state['tavily_key'] = st.text_input(
+                        'Tavily API 키', st.session_state['tavily_key'],
+                        type='password', placeholder='tvly-...',
+                    )
+                elif st.session_state['web_provider'] == 'brave':
+                    st.session_state['brave_key'] = st.text_input(
+                        'Brave API 키', st.session_state['brave_key'],
+                        type='password',
+                    )
+            else:
+                st.caption('웹 검색이 꺼져 있어 추가 설정이 보이지 않습니다.')
+
+    # ============== 응답 / 멀티모달 ==============
+    with tab_response:
+        with st.container(border=True):
+            st.markdown('##### 응답 동작')
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                st.session_state['stream'] = st.checkbox(
+                    '스트리밍 응답', value=st.session_state['stream'],
+                    help='응답을 토큰 단위로 실시간 표시.',
+                )
+            with rc2:
+                st.session_state['enable_thinking'] = st.checkbox(
+                    '추론 모드 사용', value=st.session_state['enable_thinking'],
+                    help='지원 모델에서 reasoning 토큰을 분리 표시.',
+                )
+
+        with st.container(border=True):
+            st.markdown('##### 멀티모달 (이미지)')
+            st.caption(
+                'PDF 페이지 이미지를 LLM 에 함께 전달해 표·차트·도식을 이해하게 합니다. '
+                '비전 입력 지원 모델 필요.'
+            )
+            st.session_state['include_page_images'] = st.checkbox(
+                'PDF 페이지 이미지 첨부',
+                value=st.session_state['include_page_images'],
+            )
+            if st.session_state['include_page_images']:
+                st.session_state['max_page_images'] = st.number_input(
+                    '한 턴에 보낼 이미지 수', 1, 10,
+                    int(st.session_state['max_page_images']),
+                )
+
+    # ============== 고급 ==============
+    with tab_advanced:
+        with st.container(border=True):
+            st.markdown('##### 엔드포인트')
             st.session_state['base_url'] = st.text_input(
                 '엔드포인트 주소', st.session_state['base_url'],
                 help='OpenAI 호환 endpoint. {base_url}/chat/completions 가 호출됩니다.',
             )
-            st.session_state['max_tokens'] = st.number_input(
-                '최대 응답 토큰', 16, 131072, int(st.session_state['max_tokens'])
-            )
-            st.session_state['temperature'] = st.slider(
-                '응답 다양성 (temperature)', 0.0, 2.0,
-                float(st.session_state['temperature']), 0.05,
-            )
-            st.session_state['top_p'] = st.slider(
-                'top_p', 0.0, 1.0, float(st.session_state['top_p']), 0.01,
-                help='누적 확률 임계값. 보통 0.95.',
-            )
-            st.session_state['sampling_top_k'] = st.number_input(
-                '샘플링 top_k', 1, 200,
-                int(st.session_state['sampling_top_k']),
-            )
-            st.session_state['presence_penalty'] = st.slider(
-                '반복 방지 강도 (presence_penalty)', 0.0, 2.0,
-                float(st.session_state['presence_penalty']), 0.1,
-            )
 
-        st.write('')
-        _section(
-            '멀티모달 (이미지)',
-            'PDF 페이지 이미지를 LLM에 함께 전달해 표·차트·도식을 이해하게 합니다. '
-            '모델과 엔드포인트가 비전 입력을 지원해야 동작합니다.',
-        )
-        st.session_state['include_page_images'] = st.checkbox(
-            'PDF 페이지 이미지를 답변에 활용',
-            value=st.session_state['include_page_images'],
-        )
-        if st.session_state['include_page_images']:
-            st.session_state['max_page_images'] = st.number_input(
-                '한 턴에 보낼 이미지 수', 1, 10,
-                int(st.session_state['max_page_images']),
-            )
+        with st.container(border=True):
+            st.markdown('##### 샘플링 / 응답 길이')
+            ac1, ac2 = st.columns(2)
+            with ac1:
+                st.session_state['max_tokens'] = st.number_input(
+                    '최대 응답 토큰', 16, 131072,
+                    int(st.session_state['max_tokens']),
+                )
+                st.session_state['temperature'] = st.slider(
+                    'temperature', 0.0, 2.0,
+                    float(st.session_state['temperature']), 0.05,
+                )
+                st.session_state['top_p'] = st.slider(
+                    'top_p', 0.0, 1.0, float(st.session_state['top_p']), 0.01,
+                )
+            with ac2:
+                st.session_state['sampling_top_k'] = st.number_input(
+                    'top_k', 1, 200, int(st.session_state['sampling_top_k']),
+                )
+                st.session_state['presence_penalty'] = st.slider(
+                    'presence_penalty', 0.0, 2.0,
+                    float(st.session_state['presence_penalty']), 0.1,
+                )
 
-    # ----- 검색 + 웹 -----
-    with right:
-        _section('검색')
-
-        prev_embedder = st.session_state['embedder_model']
-        emb_labels = {
-            'BAAI/bge-m3': 'BGE-M3 (한국어 강함, 2.2GB)',
-            'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2': 'MiniLM 다국어 (가벼움, 470MB)',
-        }
-        emb_idx = (
-            EMBEDDER_CHOICES.index(st.session_state['embedder_model'])
-            if st.session_state['embedder_model'] in EMBEDDER_CHOICES else 0
-        )
-        st.session_state['embedder_model'] = st.selectbox(
-            '임베딩 모델', EMBEDDER_CHOICES,
-            index=emb_idx,
-            format_func=lambda x: emb_labels.get(x, x),
-            help='문서와 질문을 벡터로 변환하는 모델. BGE-M3가 품질이 더 좋지만 무겁습니다.',
-        )
-        if st.session_state['embedder_model'] != prev_embedder:
-            st.session_state['_loaded_for_embedder'] = None
-            load_all_for_current_embedder()
-            st.rerun()
-
-        mode_labels = {'hybrid': '하이브리드 (권장)', 'dense': '의미 기반만', 'bm25': '키워드만'}
-        st.session_state['retrieval_mode'] = st.radio(
-            '검색 방식',
-            ['hybrid', 'dense', 'bm25'],
-            index=['hybrid', 'dense', 'bm25'].index(
-                st.session_state['retrieval_mode']
-            ),
-            horizontal=True,
-            format_func=lambda x: mode_labels[x],
-            help='하이브리드 = 의미 검색 + 키워드 검색을 함께 사용합니다.',
-        )
-        st.session_state['use_reranker'] = st.checkbox(
-            '정확도 우선 (재정렬 모델 사용)',
-            value=st.session_state['use_reranker'],
-            help='추가 모델로 검색 결과를 정밀하게 재정렬합니다. 정확도는 올라가고 응답은 약간 느려집니다.',
-        )
-        # Bypass RAG entirely — useful for quick general chats, off-topic
-        # questions, or comparing the model's base knowledge against its
-        # RAG-augmented answers.
-        st.session_state['general_chat_mode'] = st.checkbox(
-            '일반 대화 모드 (문서 검색 끔)',
-            value=st.session_state['general_chat_mode'],
-            help='업로드한 문서나 웹 검색을 건너뛰고 LLM 본연의 지식만으로 답합니다. '
-            '문서가 있어도 강제로 RAG 를 사용하지 않습니다.',
-        )
-        # pgvector dense search toggle — only useful when Supabase is wired up
-        # AND the user has applied db_schema_pgvector.sql. We still expose the
-        # toggle in single-tenant local mode so devs can flip it; if Supabase
-        # isn't configured the retrieve helper transparently falls back to the
-        # in-memory numpy path.
-        _pgv_available = _supabase_client() is not None
-        st.session_state['use_pgvector_search'] = st.checkbox(
-            'pgvector 로 의미 검색 (Supabase)',
-            value=st.session_state['use_pgvector_search'],
-            help=(
-                'Supabase 의 pgvector 인덱스를 이용해 dense 검색을 수행합니다. '
-                'Cloud 컨테이너 재시작 후에도 이전 사용자의 인덱스가 그대로 살아 '
-                '있어서 첫 사용도 빠릅니다. db_schema_pgvector.sql 을 먼저 실행해 '
-                '주세요. 실패하면 자동으로 로컬 검색으로 폴백합니다.'
-            ),
-            disabled=not _pgv_available,
-        )
-        if not _pgv_available and st.session_state['use_pgvector_search']:
-            st.caption('Supabase 미연동 상태라 토글이 비활성화되어 있습니다.')
-        # Agentic search — LLM may issue follow-up retrievals via tool call.
-        st.session_state['use_agentic_search'] = st.checkbox(
-            '에이전트 검색 (LLM 이 추가 검색 결정)',
-            value=st.session_state['use_agentic_search'],
-            help=(
-                '초기 컨텍스트만으로 부족하다고 판단되면, 모델이 직접 추가 검색 '
-                '쿼리를 발행해 근거를 보강합니다. 비교/다단계 질문에 유리. '
-                '도구 호출(function calling) 지원 모델 필요 (gpt-5, gpt-4.1, '
-                'Qwen3, Llama-3.x 등). 미지원 모델은 일반 모드로 자동 폴백. '
-                '응답이 약간 느려집니다 (검색 라운드 1회당 +1 API 호출).'
-            ),
-        )
-        if st.session_state['use_agentic_search']:
-            st.session_state['agentic_max_iters'] = st.slider(
-                '최대 검색 라운드', 1, 5,
-                int(st.session_state.get('agentic_max_iters', 3)),
-                help='모델이 도구 호출을 통해 추가 검색할 수 있는 최대 횟수. '
-                '많을수록 정확하지만 비용/지연 증가.',
-            )
-        st.session_state['use_contextual_rewrite'] = st.checkbox(
-            '이어지는 질문 자동 보완',
-            value=st.session_state['use_contextual_rewrite'],
-            help='이전 대화를 참고해 "그게 뭐야?" 같은 질문을 self-contained 질문으로 재작성합니다.',
-        )
-        st.session_state['per_doc_balance'] = st.checkbox(
-            '여러 문서 균형 검색',
-            value=st.session_state['per_doc_balance'],
-            help='상위 결과가 한 문서에 쏠리지 않도록, 각 문서에서 최소 N개 청크를 강제로 포함시킵니다. '
-            'cross-document 사실 비교에 유리.',
-        )
-        st.session_state['comparison_autodetect'] = st.checkbox(
-            '비교 질문 자동 감지',
-            value=st.session_state['comparison_autodetect'],
-            help='질문에 "비교", "차이", "공통", "vs" 등이 들어 있으면 문서별 최소 청크 수를 자동으로 올립니다.',
-        )
-
-        with st.expander('고급 검색 설정'):
-            r_cols = st.columns(2)
-            with r_cols[0]:
+        with st.container(border=True):
+            st.markdown('##### 검색 정밀도')
+            ad1, ad2 = st.columns(2)
+            with ad1:
                 st.session_state['retrieve_top_n'] = st.number_input(
-                    '1차 검색 결과 수', 1, 200,
+                    '1차 후보 수', 1, 200,
                     int(st.session_state['retrieve_top_n']),
                     help='재정렬 전에 가져올 후보 청크 수.',
                 )
-            with r_cols[1]:
                 st.session_state['final_top_k'] = st.number_input(
-                    '최종 사용할 결과 수', 1, 50,
+                    '최종 청크 수', 1, 50,
                     int(st.session_state['final_top_k']),
-                    help='LLM에 컨텍스트로 전달할 최종 청크 수.',
+                    help='LLM 에 컨텍스트로 전달할 최종 청크 수.',
+                )
+            with ad2:
+                st.session_state['per_doc_reserve'] = st.number_input(
+                    '문서당 최소 청크', 1, 5,
+                    int(st.session_state['per_doc_reserve']),
                 )
             st.session_state['use_multi_query'] = st.checkbox(
-                '다중 쿼리 (LLM이 질문을 여러 표현으로 변형)',
+                '다중 쿼리 (paraphrase)',
                 value=st.session_state['use_multi_query'],
-                help='paraphrase한 질문들로 각각 검색해 결과를 합칩니다. 검색 recall 향상.',
+                help='질문을 여러 표현으로 변형 후 합집합 검색.',
             )
             if st.session_state['use_multi_query']:
                 st.session_state['n_paraphrases'] = st.number_input(
@@ -4548,45 +4621,7 @@ def view_settings():
             st.session_state['use_hyde'] = st.checkbox(
                 'HyDE (가상 답안 검색)',
                 value=st.session_state['use_hyde'],
-                help='LLM이 만든 가상의 답변 문단을 검색 쿼리로 사용합니다. 모호한 질문에 유리.',
             )
-            st.session_state['per_doc_reserve'] = st.number_input(
-                '문서당 최소 청크 수 (균형 검색)', 1, 5,
-                int(st.session_state['per_doc_reserve']),
-                help='"여러 문서 균형 검색"이 켜져 있을 때 적용. 비교 질문은 자동으로 2 이상으로 상향됩니다.',
-            )
-
-        st.write('')
-        _section(
-            '웹 검색',
-            '질문 시 웹 검색 결과를 함께 컨텍스트에 포함합니다. DuckDuckGo는 API 키가 필요 없습니다.',
-        )
-        st.session_state['web_enabled'] = st.checkbox(
-            '실시간 웹 검색 사용',
-            value=st.session_state['web_enabled'],
-        )
-        if st.session_state['web_enabled']:
-            wp_labels = {'duckduckgo': 'DuckDuckGo (키 불필요)',
-                         'tavily': 'Tavily (LLM 최적화, 키 필요)',
-                         'brave': 'Brave (키 필요)'}
-            st.session_state['web_provider'] = st.selectbox(
-                '검색 제공자', ['duckduckgo', 'tavily', 'brave'],
-                index=['duckduckgo', 'tavily', 'brave'].index(
-                    st.session_state['web_provider']
-                ),
-                format_func=lambda x: wp_labels[x],
-            )
-            st.session_state['web_top_n'] = st.number_input(
-                '가져올 결과 수', 1, 20, int(st.session_state['web_top_n'])
-            )
-            if st.session_state['web_provider'] == 'tavily':
-                st.session_state['tavily_key'] = st.text_input(
-                    'Tavily API 키', st.session_state['tavily_key'], type='password',
-                )
-            elif st.session_state['web_provider'] == 'brave':
-                st.session_state['brave_key'] = st.text_input(
-                    'Brave API 키', st.session_state['brave_key'], type='password',
-                )
 
 
 # =============================================================================
@@ -4595,257 +4630,318 @@ def view_settings():
 
 def view_cache():
     _section(
-        'Hugging Face Hub cache',
-        '로컬에 다운로드된 모델 가중치 목록입니다. 사용하지 않는 모델은 삭제해 디스크를 회수할 수 있습니다.',
+        '데이터 & 저장소',
+        '클라우드 영속 저장, 로컬 디스크, 모델 캐시를 한 곳에서 관리.',
     )
-    try:
-        from huggingface_hub import scan_cache_dir
-        info = scan_cache_dir()
-        cached = [(r.repo_id, r.size_on_disk_str, str(r.repo_path)) for r in info.repos]
-    except Exception:
-        cached = []
-    if not cached:
-        _empty('캐시된 모델이 없습니다.')
-    else:
-        for repo_id, size, path in cached:
-            with st.container(border=True):
-                cols = st.columns([4, 1, 1])
-                cols[0].markdown(f"`{repo_id}`")
-                cols[1].caption(size)
-                if cols[2].button('삭제', key=f'cache_{repo_id}', use_container_width=True):
-                    try:
-                        shutil.rmtree(path)
-                        st.success(f'{repo_id} 삭제 완료')
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f'캐시 삭제 실패: {e}')
 
-    st.write('')
     user_logs = _user_logs_dir()
-    _section(
-        '대화 로그',
-        f'경로: `{user_logs}` — 사용자별로 분리. 각 대화가 `{{session_id}}.jsonl` '
-        '파일로 저장됩니다 (한 줄당 한 턴, 분석·DB 적재 친화적).',
-    )
+    user_dd = _user_data_dir()
 
-    # ----- Persistent logging status (Supabase) -----
-    if _supabase_client() is not None:
-        attempts = st.session_state.get('_sb_attempts', 0)
-        successes = st.session_state.get('_sb_successes', 0)
-        failures = st.session_state.get('_sb_failures', 0)
-        last_err = st.session_state.get('_sb_last_err')
+    # ----- Compute compact stats for the overview row -----
+    sb_connected = _supabase_client() is not None
+    sb_attempts = st.session_state.get('_sb_attempts', 0)
+    sb_failures = st.session_state.get('_sb_failures', 0)
+    pgv_successes = st.session_state.get('_pgv_successes', 0)
+    pgv_failures = st.session_state.get('_pgv_failures', 0)
 
-        if failures == 0 and attempts > 0:
-            st.success(
-                f'영속 로깅: Supabase Postgres 정상 — '
-                f'이 세션 INSERT {successes}/{attempts} 성공. '
-                f'컨테이너 재시작되어도 보존됩니다.'
-            )
-        elif failures == 0 and attempts == 0:
-            st.info(
-                '영속 로깅: Supabase 연결됨, 아직 이 세션에서 INSERT 시도 없음. '
-                '아래 진단 버튼으로 즉시 테스트해보세요.'
-            )
-        else:
-            st.error(
-                f'영속 로깅 연결됐으나 INSERT 실패 중 — {failures}/{attempts} 실패. '
-                '대부분의 원인: RLS(Row-Level Security) 또는 스키마 누락.'
-            )
-            if last_err:
-                with st.expander('마지막 INSERT 실패 메시지 보기', expanded=True):
-                    st.code(last_err)
-
-        # 1-click round-trip test: INSERT a probe row and immediately DELETE it.
-        if st.button(
-            'Supabase 연결 진단 (INSERT + DELETE 1행)',
-            use_container_width=False,
-            key='sb_diagnose_btn',
-        ):
-            import time as _t
-            client = _supabase_client()
-            probe = {
-                'event_type': 'diagnostic_probe',
-                'user_id': st.session_state.get('user_id', '_local'),
-                'payload': {'ts': _t.time(), 'note': '캐시 탭 진단 버튼'},
-            }
-            try:
-                ins = client.table('events').insert(probe).execute()
-                ins_id = (ins.data[0]['id']
-                          if getattr(ins, 'data', None) and ins.data else None)
-                st.success(
-                    f'INSERT 성공: events 테이블에 id={ins_id} 추가됨. '
-                    f'아래에서 자동 정리 중...'
-                )
-                if ins_id is not None:
-                    try:
-                        client.table('events').delete().eq('id', ins_id).execute()
-                        st.info(f'정리 완료: id={ins_id} 삭제됨. DB는 정상 작동 중.')
-                    except Exception as de:
-                        st.warning(
-                            f'INSERT 는 됐는데 DELETE 실패 ({de}). '
-                            f'테이블에 진단 행 1개 남아있을 수 있음 — Table Editor 에서 수동 삭제 가능.'
-                        )
-            except Exception as e:
-                st.error(f'INSERT 실패: {type(e).__name__}')
-                st.code(str(e)[:1500])
-                msg = str(e).lower()
-                if 'row-level security' in msg or 'rls' in msg or 'policy' in msg:
-                    st.markdown(
-                        '**원인: RLS 가 막고 있음.** Supabase SQL Editor 에서 한 번 실행:\n\n'
-                        '```sql\n'
-                        'alter table public.events     disable row level security;\n'
-                        'alter table public.chat_turns disable row level security;\n'
-                        'alter table public.agent_runs disable row level security;\n'
-                        '```'
-                    )
-                elif 'does not exist' in msg or '42p01' in msg:
-                    st.markdown(
-                        '**원인: 테이블이 없음.** Supabase SQL Editor 에서 `db_schema.sql` 내용을 실행하세요.'
-                    )
-                elif '401' in msg or '403' in msg or 'unauthorized' in msg:
-                    st.markdown(
-                        '**원인: 키 권한 문제.** Settings → Secrets 의 `SUPABASE_KEY` 가 anon public 키인지 확인.'
-                    )
-
-        # ----- pgvector upsert status (chunk embeddings) -----
-        pgv_attempts = st.session_state.get('_pgv_attempts', 0)
-        pgv_successes = st.session_state.get('_pgv_successes', 0)
-        pgv_failures = st.session_state.get('_pgv_failures', 0)
-        pgv_last_err = st.session_state.get('_pgv_last_err')
-        if pgv_attempts > 0:
-            if pgv_failures == 0:
-                st.success(
-                    f'pgvector: 이 세션에서 청크 임베딩 {pgv_successes}/{pgv_attempts} 건 영속화 성공.'
-                )
-            else:
-                st.error(
-                    f'pgvector: 청크 영속화 {pgv_failures}/{pgv_attempts} 실패. '
-                    '`db_schema_pgvector.sql` 을 Supabase SQL Editor 에서 실행했는지 확인하세요.'
-                )
-                if pgv_last_err:
-                    with st.expander('마지막 pgvector 에러', expanded=False):
-                        st.code(pgv_last_err)
-        else:
-            st.info(
-                'pgvector: 이 세션 인덱싱 없음. 문서를 업로드하면 청크 임베딩이 '
-                'Supabase 의 `doc_chunks` 테이블에도 자동 저장됩니다 '
-                '(스키마 적용 필요: `db_schema_pgvector.sql`).'
-            )
-
-        # Active dense retrieval source.
-        if st.session_state.get('use_pgvector_search'):
-            n = st.session_state.get('_pgv_search_last_n')
-            err = st.session_state.get('_pgv_search_last_err')
-            if err:
-                st.warning(
-                    f'의미 검색 경로: pgvector (직전 호출 실패 → 로컬 폴백). '
-                )
-                with st.expander('마지막 pgvector 검색 에러', expanded=False):
-                    st.code(err)
-            elif n is None:
-                st.caption('의미 검색 경로: pgvector (아직 호출 없음)')
-            else:
-                st.caption(f'의미 검색 경로: pgvector — 직전 호출 {n}건 반환')
-        else:
-            st.caption('의미 검색 경로: 로컬 numpy (in-memory)')
-    else:
-        if _is_streamlit_cloud():
-            st.warning(
-                '영속 로깅 미설정 — 아래 로컬 JSONL 파일은 컨테이너 재시작 시 사라집니다. '
-                '영구 보존하려면 Settings → Secrets 에 `SUPABASE_URL` 과 `SUPABASE_KEY` 를 추가하세요 '
-                '(README 의 "영속 로깅 설정" 섹션 참고, 5분 소요).'
-            )
-        else:
-            st.info(
-                '영속 로깅 미설정 — 로컬 개발 중에는 JSONL 만으로도 충분합니다. '
-                'Cloud 에 배포 시에는 `SUPABASE_URL` / `SUPABASE_KEY` 설정 권장.'
-            )
-
-    # Agent runs + events logs (separate aggregate files)
-    for fname, label_text in (
-        ('agents.jsonl', '에이전트 실행 기록'),
-        ('events.jsonl', '로그인 · 문서 · 세션 · LLM 에러 이벤트'),
-    ):
-        fpath = user_logs / fname
-        if not fpath.exists():
-            continue
-        try:
-            n_lines = sum(1 for _ in fpath.open('r', encoding='utf-8'))
-        except Exception:
-            n_lines = '?'
-        size_kb = fpath.stat().st_size / 1024
-        unit = 'runs' if fname == 'agents.jsonl' else 'events'
-        with st.container(border=True):
-            cols = st.columns([5, 1, 1])
-            cols[0].markdown(f"**`{fname}`** · {label_text}")
-            cols[1].caption(f'{n_lines} {unit} · {size_kb:.1f} KB')
-            with cols[2]:
+    # Local disk usage (sum of all files under user_dd).
+    local_bytes = 0
+    if user_dd.exists():
+        for p in user_dd.rglob('*'):
+            if p.is_file():
                 try:
-                    st.download_button(
-                        '다운로드', data=fpath.read_bytes(),
-                        file_name=fname, mime='application/x-jsonlines',
-                        key=f'dl_{fname}', use_container_width=True,
-                    )
+                    local_bytes += p.stat().st_size
                 except Exception:
                     pass
 
-    _AGGREGATE_LOGS = {'agents.jsonl', 'events.jsonl'}
-    jsonl_files = sorted(
-        [p for p in user_logs.glob('*.jsonl') if p.name not in _AGGREGATE_LOGS],
-        key=lambda p: p.stat().st_mtime, reverse=True,
+    # HF model cache size.
+    hf_cached = []
+    try:
+        from huggingface_hub import scan_cache_dir
+        info = scan_cache_dir()
+        hf_cached = [(r.repo_id, r.size_on_disk_str, str(r.repo_path), r.size_on_disk)
+                     for r in info.repos]
+    except Exception:
+        hf_cached = []
+    hf_total_bytes = sum(x[3] for x in hf_cached)
+
+    def _fmt_size(b):
+        if b < 1024:
+            return f'{b} B'
+        if b < 1024 * 1024:
+            return f'{b / 1024:.1f} KB'
+        if b < 1024 ** 3:
+            return f'{b / 1024 / 1024:.1f} MB'
+        return f'{b / 1024 ** 3:.2f} GB'
+
+    # ----- Top overview: 4 metric cards -----
+    with st.container(border=True):
+        m = st.columns(4)
+        if sb_connected:
+            sb_label = '정상' if sb_failures == 0 else f'{sb_failures}건 실패'
+            m[0].metric('영속 로깅', sb_label, delta=f'{sb_attempts} 시도' if sb_attempts else None)
+        else:
+            m[0].metric('영속 로깅', '미설정')
+        if sb_connected and pgv_successes:
+            pgv_label = f'{pgv_successes}건' if pgv_failures == 0 else f'{pgv_failures}건 실패'
+            m[1].metric('pgvector', pgv_label)
+        elif sb_connected:
+            m[1].metric('pgvector', '대기')
+        else:
+            m[1].metric('pgvector', '미연결')
+        m[2].metric('로컬 디스크', _fmt_size(local_bytes))
+        m[3].metric('HF 모델 캐시', _fmt_size(hf_total_bytes))
+
+    # ----- Tabbed body -----
+    tab_supabase, tab_local, tab_hf = st.tabs(
+        ['클라우드 영속 (Supabase)', '로컬 디스크', 'HF 모델 캐시']
     )
-    if not jsonl_files:
-        _empty('대화 로그는 아직 없습니다.')
-    else:
-        for p in jsonl_files[:30]:
-            try:
-                n_lines = sum(1 for _ in p.open('r', encoding='utf-8'))
-            except Exception:
-                n_lines = '?'
-            size_kb = p.stat().st_size / 1024
+
+    # ============== Supabase ==============
+    with tab_supabase:
+        if not sb_connected:
             with st.container(border=True):
+                if _is_streamlit_cloud():
+                    st.warning(
+                        '영속 로깅 미설정 — 아래 로컬 JSONL 은 컨테이너 재시작 시 사라집니다.'
+                    )
+                    st.markdown(
+                        '**활성화 방법:** Manage app → Settings → Secrets 에 다음 추가:\n'
+                        '```toml\n'
+                        'SUPABASE_URL = "https://xxxx.supabase.co"\n'
+                        'SUPABASE_KEY = "eyJ..."\n'
+                        '```\n'
+                        '그 후 SQL Editor 에서 `db_schema.sql` / `db_schema_pgvector.sql` / `db_schema_users.sql` 실행.'
+                    )
+                else:
+                    st.info(
+                        '로컬 개발 중에는 JSONL 만으로 충분합니다. '
+                        'Cloud 배포 시 `SUPABASE_URL` / `SUPABASE_KEY` 설정 권장.'
+                    )
+        else:
+            # Status cards
+            with st.container(border=True):
+                st.markdown('##### 로깅 (chat_turns / agent_runs / events)')
+                successes = st.session_state.get('_sb_successes', 0)
+                last_err = st.session_state.get('_sb_last_err')
+                if sb_attempts == 0:
+                    st.info('이 세션에서 INSERT 시도 없음. 아래 진단 버튼으로 즉시 테스트 가능.')
+                elif sb_failures == 0:
+                    st.success(f'INSERT {successes}/{sb_attempts} 성공. 컨테이너 재시작에도 보존.')
+                else:
+                    st.error(
+                        f'INSERT {sb_failures}/{sb_attempts} 실패. '
+                        'RLS / 스키마 누락 등 점검 필요.'
+                    )
+                    if last_err:
+                        with st.expander('마지막 실패 메시지', expanded=True):
+                            st.code(last_err)
+
+                if st.button(
+                    '연결 진단 (events 1행 INSERT + DELETE)',
+                    key='sb_diagnose_btn',
+                ):
+                    import time as _t
+                    client = _supabase_client()
+                    probe = {
+                        'event_type': 'diagnostic_probe',
+                        'user_id': st.session_state.get('user_id', '_local'),
+                        'payload': {'ts': _t.time(), 'note': '캐시 탭 진단 버튼'},
+                    }
+                    try:
+                        ins = client.table('events').insert(probe).execute()
+                        ins_id = (ins.data[0]['id']
+                                  if getattr(ins, 'data', None) and ins.data else None)
+                        st.success(f'INSERT 성공 (id={ins_id}). 정리 중...')
+                        if ins_id is not None:
+                            try:
+                                client.table('events').delete().eq('id', ins_id).execute()
+                                st.info(f'정리 완료 (id={ins_id} 삭제). DB 정상.')
+                            except Exception as de:
+                                st.warning(
+                                    f'INSERT 됐는데 DELETE 실패 ({de}).'
+                                )
+                    except Exception as e:
+                        st.error(f'INSERT 실패: {type(e).__name__}')
+                        st.code(str(e)[:1500])
+                        msg = str(e).lower()
+                        if 'row-level security' in msg or 'rls' in msg or 'policy' in msg:
+                            st.markdown(
+                                '**원인: RLS 차단.** SQL Editor 에서 한 번 실행:\n\n'
+                                '```sql\n'
+                                'alter table public.events     disable row level security;\n'
+                                'alter table public.chat_turns disable row level security;\n'
+                                'alter table public.agent_runs disable row level security;\n'
+                                '```'
+                            )
+                        elif 'does not exist' in msg or '42p01' in msg:
+                            st.markdown('**원인: 테이블 없음.** `db_schema.sql` 실행 필요.')
+                        elif '401' in msg or '403' in msg or 'unauthorized' in msg:
+                            st.markdown('**원인: 키 권한.** anon public 키인지 확인.')
+
+            # pgvector status
+            with st.container(border=True):
+                st.markdown('##### pgvector (청크 임베딩 영속화)')
+                pgv_attempts = st.session_state.get('_pgv_attempts', 0)
+                pgv_last_err = st.session_state.get('_pgv_last_err')
+                if pgv_attempts == 0:
+                    st.info(
+                        '이 세션 인덱싱 없음. 문서 업로드 시 청크 임베딩이 '
+                        '`doc_chunks` 테이블에 자동 저장됩니다. '
+                        '(스키마: `db_schema_pgvector.sql`)'
+                    )
+                elif pgv_failures == 0:
+                    st.success(
+                        f'청크 임베딩 {pgv_successes}/{pgv_attempts} 영속화 성공.'
+                    )
+                else:
+                    st.error(
+                        f'영속화 {pgv_failures}/{pgv_attempts} 실패. '
+                        '`db_schema_pgvector.sql` 적용 확인.'
+                    )
+                    if pgv_last_err:
+                        with st.expander('마지막 pgvector 에러', expanded=False):
+                            st.code(pgv_last_err)
+
+                # Active retrieval source.
+                if st.session_state.get('use_pgvector_search'):
+                    n = st.session_state.get('_pgv_search_last_n')
+                    err = st.session_state.get('_pgv_search_last_err')
+                    if err:
+                        st.warning('의미 검색 경로: pgvector (직전 호출 실패 → 로컬 폴백)')
+                        with st.expander('검색 에러', expanded=False):
+                            st.code(err)
+                    elif n is None:
+                        st.caption('의미 검색 경로: pgvector (아직 호출 없음)')
+                    else:
+                        st.caption(f'의미 검색 경로: pgvector — 직전 호출 {n}건')
+                else:
+                    st.caption('의미 검색 경로: 로컬 numpy (in-memory)')
+
+    # ============== 로컬 디스크 ==============
+    with tab_local:
+        # Aggregate logs first (agents + events)
+        with st.container(border=True):
+            st.markdown('##### 통합 로그 파일')
+            found_any = False
+            for fname, label_text in (
+                ('events.jsonl', '로그인 / 문서 / 세션 / LLM 에러 이벤트'),
+                ('agents.jsonl', '에이전트 실행 기록'),
+            ):
+                fpath = user_logs / fname
+                if not fpath.exists():
+                    continue
+                found_any = True
+                try:
+                    n_lines = sum(1 for _ in fpath.open('r', encoding='utf-8'))
+                except Exception:
+                    n_lines = '?'
+                size_kb = fpath.stat().st_size / 1024
+                unit = 'events' if 'events' in fname else 'runs'
                 cols = st.columns([5, 1, 1])
-                cols[0].markdown(f"`{p.name}`")
-                cols[1].caption(f'{n_lines} turns · {size_kb:.1f} KB')
+                cols[0].markdown(f"**`{fname}`** · {label_text}")
+                cols[1].caption(f'{n_lines} {unit} · {size_kb:.1f} KB')
                 with cols[2]:
                     try:
                         st.download_button(
-                            '다운로드', data=p.read_bytes(),
-                            file_name=p.name, mime='application/x-jsonlines',
-                            key=f'dl_jsonl_{p.name}', use_container_width=True,
+                            '다운로드', data=fpath.read_bytes(),
+                            file_name=fname, mime='application/x-jsonlines',
+                            key=f'dl_{fname}', use_container_width=True,
                         )
                     except Exception:
                         pass
+            if not found_any:
+                st.caption('아직 통합 로그 파일이 없습니다.')
 
-    st.write('')
-    user_dd = _user_data_dir()
-    _section(
-        '로컬 벡터 스토어',
-        f'경로: `{user_dd}` — 사용자별로 분리. 임베더 모델마다 또 하위 폴더.',
-    )
-    if user_dd.exists():
-        rows = []
-        for sub in sorted(user_dd.iterdir()):
-            if not sub.is_dir() or sub.name == 'sessions':
-                continue
-            doc_dirs = [p for p in sub.iterdir() if p.is_dir()]
-            total = 0
-            for p in sub.rglob('*'):
-                if p.is_file():
+        # Per-session chat logs
+        _AGGREGATE_LOGS = {'agents.jsonl', 'events.jsonl'}
+        jsonl_files = sorted(
+            [p for p in user_logs.glob('*.jsonl') if p.name not in _AGGREGATE_LOGS],
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        with st.container(border=True):
+            st.markdown('##### 세션별 대화 로그')
+            st.caption(f'경로: `{user_logs}`')
+            if not jsonl_files:
+                st.caption('대화 로그는 아직 없습니다.')
+            else:
+                for p in jsonl_files[:30]:
                     try:
-                        total += p.stat().st_size
+                        n_lines = sum(1 for _ in p.open('r', encoding='utf-8'))
                     except Exception:
-                        pass
-            rows.append((sub.name, len(doc_dirs), total))
-        if not rows:
-            _empty('저장된 벡터 인덱스가 없습니다.')
-        else:
-            for name, n, size in rows:
-                with st.container(border=True):
+                        n_lines = '?'
+                    size_kb = p.stat().st_size / 1024
+                    cols = st.columns([5, 1, 1])
+                    cols[0].markdown(f"`{p.name}`")
+                    cols[1].caption(f'{n_lines} turns · {size_kb:.1f} KB')
+                    with cols[2]:
+                        try:
+                            st.download_button(
+                                '다운로드', data=p.read_bytes(),
+                                file_name=p.name,
+                                mime='application/x-jsonlines',
+                                key=f'dl_jsonl_{p.name}',
+                                use_container_width=True,
+                            )
+                        except Exception:
+                            pass
+                if len(jsonl_files) > 30:
+                    st.caption(f'표시 30개 / 전체 {len(jsonl_files)}개')
+
+        # Local vector store
+        with st.container(border=True):
+            st.markdown('##### 로컬 벡터 스토어')
+            st.caption(f'경로: `{user_dd}` — 임베더 모델마다 하위 폴더.')
+            if not user_dd.exists():
+                st.caption('아직 저장된 벡터 인덱스가 없습니다.')
+            else:
+                rows = []
+                for sub in sorted(user_dd.iterdir()):
+                    if not sub.is_dir() or sub.name == 'sessions':
+                        continue
+                    doc_dirs = [p for p in sub.iterdir() if p.is_dir()]
+                    total = 0
+                    for p in sub.rglob('*'):
+                        if p.is_file():
+                            try:
+                                total += p.stat().st_size
+                            except Exception:
+                                pass
+                    rows.append((sub.name, len(doc_dirs), total))
+                if not rows:
+                    st.caption('아직 저장된 벡터 인덱스가 없습니다.')
+                else:
+                    for name, n, size in rows:
+                        cols = st.columns([4, 1, 1])
+                        cols[0].markdown(f"`{name}`")
+                        cols[1].caption(f'{n} docs')
+                        cols[2].caption(_fmt_size(size))
+
+    # ============== HF 모델 캐시 ==============
+    with tab_hf:
+        with st.container(border=True):
+            st.markdown('##### Hugging Face 다운로드 모델')
+            st.caption(
+                '임베더 / reranker / 자가호스팅 모델 등 로컬 다운로드된 가중치. '
+                '사용하지 않는 항목은 삭제해 디스크 회수.'
+            )
+            if not hf_cached:
+                st.caption('캐시된 모델이 없습니다.')
+            else:
+                for repo_id, size_str, path, _bytes in hf_cached:
                     cols = st.columns([4, 1, 1])
-                    cols[0].markdown(f"`{name}`")
-                    cols[1].caption(f'{n} docs')
-                    cols[2].caption(f'{size / 1024 / 1024:.1f} MB')
+                    cols[0].markdown(f"`{repo_id}`")
+                    cols[1].caption(size_str)
+                    if cols[2].button(
+                        '삭제', key=f'cache_{repo_id}',
+                        use_container_width=True,
+                    ):
+                        try:
+                            shutil.rmtree(path)
+                            st.success(f'{repo_id} 삭제 완료')
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f'삭제 실패: {e}')
 
 
 # =============================================================================
