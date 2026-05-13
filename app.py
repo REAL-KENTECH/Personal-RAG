@@ -477,6 +477,10 @@ _PERSIST_KEYS = (
     'max_tokens', 'temperature', 'top_p', 'sampling_top_k',
     'presence_penalty', 'stream', 'enable_thinking',
     'chat_doc_filter', 'active_view',
+    # Active conversation pointer — combined with auto-restore in view_chat
+    # this lets the user pick up exactly where they were after a Cloud
+    # idle reset, not just "new chat on the chat tab".
+    'current_session_id',
 )
 
 
@@ -2493,6 +2497,17 @@ with st.sidebar:
 # =============================================================================
 
 def view_chat():
+    # Auto-restore the last active conversation if session_state was wiped
+    # by an idle reconnect. preferences.json carries current_session_id; the
+    # actual messages live in .data/{user}/sessions/{id}.json on disk and
+    # are pulled in here by load_session().
+    _restore_sid = st.session_state.get('current_session_id')
+    if _restore_sid and not st.session_state.get('user_inputs'):
+        try:
+            load_session(_restore_sid)
+        except Exception:
+            pass
+
     local_active = bool(st.session_state['docs'])
     web_active = bool(st.session_state['web_enabled'])
 
