@@ -2046,6 +2046,116 @@ def model_picker(label: str, key_prefix: str):
         st.session_state['model'] = choice
 
 
+def _show_llm_error(e: Exception):
+    """Render a Korean, actionable error message for common LLM call failures.
+
+    Pattern-matches the most frequent ones (HF Inference Providers permission
+    missing, gated model, invalid token, quota, model not deployed, network)
+    and falls back to the raw text otherwise."""
+    err_str = str(e) or ''
+    el = err_str.lower()
+
+    def show(headline, body_md):
+        st.error(headline)
+        st.markdown(body_md)
+        with st.expander('원본 오류 메시지'):
+            st.code(err_str[:1500] or repr(e))
+
+    # HF Router — Inference Providers permission missing (403)
+    if ('inference providers' in el
+            and ('insufficient permissions' in el or 'does not have' in el
+                 or 'this authentication method' in el)):
+        show(
+            'Hugging Face 토큰에 "Inference Providers" 권한이 없습니다.',
+            """
+**해결 방법:**
+
+1. https://huggingface.co/settings/tokens 접속
+2. 사용 중인 토큰 이름 클릭 → **Edit permissions** (또는 + Create new token → Fine-grained)
+3. 다음 권한 체크:
+   - ✅ **Make calls to Inference Providers** ← 필수
+   - ✅ Make calls to the serverless Inference API (권장)
+   - ✅ Read access to public repositories (자동 포함)
+   - Llama / Gemma 같은 gated 모델 쓰면 → Read access to selected gated repositories 추가
+4. **Save** → 설정 탭에서 Hugging Face 토큰 칸 갱신 (또는 .env / Cloud secrets 의 HF_TOKEN 갱신)
+5. (Cloud 배포면) Manage app → Reboot
+            """,
+        )
+        return
+
+    # HF — gated model (Llama, Gemma 등) 라이선스 미수락 / gated 권한 누락
+    if ('gated' in el or
+            ('access to model' in el and ('granted' in el or 'requires' in el)) or
+            ('is restricted' in el and 'license' in el)):
+        show(
+            'Gated 모델 접근 권한 없음.',
+            """
+**해결 방법:**
+
+1. 해당 모델 페이지 (예: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) 에서 라이선스 약관 수락
+2. https://huggingface.co/settings/tokens → 토큰 권한에 **Read access to selected gated repositories** 추가하고 해당 모델 체크
+3. 토큰 저장 → 앱에서 다시 시도
+            """,
+        )
+        return
+
+    # Provider 미지원 / 모델 deploy 안 됨
+    if 'not supported by any provider' in el or 'model_not_supported' in el:
+        show(
+            '이 모델을 서빙하는 활성 Provider가 없습니다.',
+            """
+**해결 방법:**
+
+1. 모델 카드 우측 "Inference Providers" 박스에서 서빙 가능한 provider 확인
+2. https://huggingface.co/settings/inference-providers 에서 해당 provider 활성화 (Together AI / Cerebras / Hyperbolic 등)
+3. 또는 설정 탭에서 다른 모델로 변경
+            """,
+        )
+        return
+
+    # 토큰 자체가 무효 / 만료
+    if ('invalid' in el and 'token' in el) or 'bad credentials' in el or '401' in el:
+        show(
+            'API 키 / 토큰 인증 실패 (401).',
+            """
+**해결 방법:**
+
+1. 설정 탭에서 현재 공급자의 API 키가 비어있지 않은지 확인
+2. 토큰이 만료됐다면 발급처에서 새로 만들기:
+   - Hugging Face: https://huggingface.co/settings/tokens
+   - OpenAI: https://platform.openai.com/api-keys
+3. 새 키로 갱신 → 다시 시도
+            """,
+        )
+        return
+
+    # 결제 / 쿼터 초과
+    if ('quota' in el or 'rate limit' in el or 'insufficient_quota' in el
+            or '429' in err_str or '402' in err_str):
+        show(
+            '사용량 / 쿼터 초과 또는 결제 필요.',
+            """
+**해결 방법:**
+
+- OpenAI: https://platform.openai.com/account/billing 에서 결제 / 한도 확인
+- HF Inference Providers: provider 별로 무료 크레딧 한도 다름. 다른 provider 활성화 시도.
+- 잠시 후 재시도하거나 더 작은 모델로 변경.
+            """,
+        )
+        return
+
+    # 네트워크 / 타임아웃
+    if 'timeout' in el or 'timed out' in el or 'connection' in el:
+        show(
+            '네트워크 / 타임아웃.',
+            '잠시 후 다시 시도해 주세요. 문제가 지속되면 다른 공급자로 변경.',
+        )
+        return
+
+    # Fallback
+    st.error(f'요청 실패: {e}')
+
+
 def handle_chat_turn(user_input: str):
     """Process one user turn: retrieve, call LLM, render, persist to history."""
     if (not st.session_state['model']
@@ -2131,7 +2241,7 @@ def handle_chat_turn(user_input: str):
                     full_text, reasoning_text = non_stream_chat(client, params)
             elapsed_sec = _time.time() - _t0
         except Exception as e:
-            st.error(f'요청 실패: {e}')
+            _show_llm_error(e)
             full_text, reasoning_text = '', ''
 
         if full_text and not reasoning_text:
@@ -3351,9 +3461,13 @@ def view_agents():
             st.error('최소 한 개 이상의 문서를 선택해 주세요.')
             st.stop()
 
-        full_text, reasoning, retrieved, elapsed = run_agent_task(
-            selected, inputs, doc_ids_filter=selected_doc_ids,
-        )
+        try:
+            full_text, reasoning, retrieved, elapsed = run_agent_task(
+                selected, inputs, doc_ids_filter=selected_doc_ids,
+            )
+        except Exception as e:
+            _show_llm_error(e)
+            st.stop()
 
         st.write('')
         _section('결과', f'생성 시간: {elapsed:.1f}s')
