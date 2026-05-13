@@ -2569,11 +2569,45 @@ def view_chat():
     elif web_active:
         _placeholder = '웹 검색 후 답합니다'
     else:
-        _placeholder = '메시지를 입력하세요'
+        _placeholder = '메시지를 입력하세요 (.txt / .md / .pdf 파일 첨부 가능)'
 
-    user_input = st.chat_input(_placeholder)
-    if user_input:
-        handle_chat_turn(user_input)
+    # Streamlit 1.42+: chat_input supports inline file attachments.
+    # Fall back to plain chat_input on older versions.
+    try:
+        submitted = st.chat_input(
+            _placeholder,
+            accept_file='multiple',
+            file_type=['txt', 'md', 'pdf'],
+        )
+    except TypeError:
+        submitted = st.chat_input(_placeholder)
+
+    if submitted:
+        # Normalize: newer Streamlit returns an object with .text and .files;
+        # older returns a bare string.
+        text_part = ''
+        file_part = []
+        if hasattr(submitted, 'text') or hasattr(submitted, 'files'):
+            text_part = (getattr(submitted, 'text', '') or '').strip()
+            file_part = list(getattr(submitted, 'files', []) or [])
+        else:
+            text_part = (submitted or '').strip()
+
+        # Ingest any attached files first so they're searchable for the same turn.
+        if file_part:
+            with st.spinner(f'{len(file_part)}개 파일 인덱싱 중...'):
+                added = ingest_files(file_part)
+            if added > 0:
+                try:
+                    st.toast(f'{added}개 문서 인덱싱 완료 — 이번 질문부터 검색 대상')
+                except Exception:
+                    pass
+
+        if text_part:
+            handle_chat_turn(text_part)
+        elif file_part:
+            # Files-only submission: just acknowledge, no LLM call.
+            st.rerun()
 
 
 # =============================================================================

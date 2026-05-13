@@ -1,4 +1,4 @@
-streamlit>=1.30
+streamlit>=1.42
 openai>=1.0
 python-dotenv
 numpy
