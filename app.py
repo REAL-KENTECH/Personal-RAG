@@ -1498,8 +1498,18 @@ def _restore_docs_from_pgvector(embedder_id: str) -> list:
         d['chunks'].append(r.get('text') or '')
         d['chunk_pages'].append(r.get('pages') or [])
         emb = r.get(vec_col)
-        if emb is None:
-            # Vector column came back NULL — skip this row in the matrix.
+        # PostgREST serializes pgvector values as text — e.g.
+        # '[0.012, -0.005, ...]'. Decode to a Python list before we try to
+        # stack them into a numpy matrix.
+        if isinstance(emb, str):
+            try:
+                emb = json.loads(emb)
+            except Exception:
+                emb = None
+        if not isinstance(emb, list) or len(emb) != mapping[2]:
+            # Bad row (dim mismatch / null / decode failed) — fill with
+            # zeros so the chunk index still aligns, retrieval will just
+            # never match it.
             emb = [0.0] * mapping[2]
         d['embeddings_list'].append(emb)
 
@@ -1507,7 +1517,13 @@ def _restore_docs_from_pgvector(embedder_id: str) -> list:
     for did, d in docs_by_id.items():
         if not d['chunks']:
             continue
-        embs = np.asarray(d['embeddings_list'], dtype=np.float32)
+        try:
+            embs = np.asarray(d['embeddings_list'], dtype=np.float32)
+        except Exception:
+            # Defensive: if rows somehow have inconsistent dims after the
+            # per-row check above, skip this doc entirely rather than
+            # crashing the whole restore.
+            continue
         # Re-normalize defensively — cosine math elsewhere assumes unit
         # length. supabase usually returns the original normalized values
         # but converting through json + back can drift floating-point.
