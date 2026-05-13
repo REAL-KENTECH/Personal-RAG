@@ -1345,6 +1345,56 @@ def list_sessions(limit: int = 30):
     return out[:limit]
 
 
+def rename_session(sid: str, new_title: str) -> bool:
+    """Rename a saved conversation in both disk metadata and Supabase.
+
+    Updates:
+      - .data/{user}/sessions/{sid}.json — title field
+      - public.chat_turns.session_title — every row of this session, so the
+        sidebar list rebuilt from Supabase also reflects the new name
+      - st.session_state['current_session_title'] if this is the active one
+    Returns True when at least one storage layer updated successfully.
+    """
+    new_title = (new_title or '').strip()[:60]
+    if not new_title:
+        return False
+    ok_any = False
+
+    # Disk metadata
+    p = _session_path(sid)
+    if p.exists():
+        try:
+            data = json.loads(p.read_text())
+            data['title'] = new_title
+            data['updated_at'] = datetime.datetime.now().isoformat()
+            p.write_text(json.dumps(data, ensure_ascii=False))
+            ok_any = True
+        except Exception:
+            pass
+
+    # Supabase chat_turns — update every row of this session for the user
+    client = _supabase_client()
+    uid = st.session_state.get('user_id', '')
+    if client is not None and uid and not uid.startswith('_anon_'):
+        try:
+            (client.table('chat_turns')
+                .update({'session_title': new_title})
+                .eq('user_id', uid)
+                .eq('session_id', sid)
+                .execute())
+            ok_any = True
+        except Exception:
+            pass
+
+    # Active session — mirror the change in session_state too.
+    if st.session_state.get('current_session_id') == sid:
+        st.session_state['current_session_title'] = new_title
+
+    if ok_any:
+        _log_event('session_rename', {'session_id': sid, 'new_title': new_title})
+    return ok_any
+
+
 def delete_session(sid: str):
     """Remove a conversation entirely — disk file + every chat_turn row in
     Supabase for that (user, session). Audit logged."""
@@ -4208,9 +4258,9 @@ with st.sidebar:
             for s in sessions:
                 is_active = (s['id'] == current_sid)
                 label = s['title'] or '(제목 없음)'
-                if len(label) > 24:
-                    label = label[:22] + '...'
-                row = st.columns([5, 1])
+                if len(label) > 22:
+                    label = label[:20] + '...'
+                row = st.columns([5, 1, 1])
                 with row[0]:
                     if st.button(
                         label,
@@ -4223,8 +4273,32 @@ with st.sidebar:
                             st.session_state['active_view'] = 'chat'
                             st.rerun()
                 with row[1]:
+                    if hasattr(st, 'popover'):
+                        with st.popover(
+                            '✎', use_container_width=True,
+                            help='대화 이름 변경',
+                        ):
+                            with st.form(
+                                f'_rename_form_{s["id"]}',
+                                clear_on_submit=False,
+                            ):
+                                new_t = st.text_input(
+                                    '대화 이름',
+                                    value=s['title'] or '',
+                                    max_chars=60,
+                                    key=f'rename_input_{s["id"]}',
+                                )
+                                if st.form_submit_button(
+                                    '저장',
+                                    use_container_width=True,
+                                    type='primary',
+                                ):
+                                    if rename_session(s['id'], new_t):
+                                        st.rerun()
+                with row[2]:
                     if st.button('×', key=f"del_sess_{s['id']}",
-                                 use_container_width=True):
+                                 use_container_width=True,
+                                 help='대화 삭제'):
                         delete_session(s['id'])
                         if current_sid == s['id']:
                             start_new_session()
@@ -4324,10 +4398,33 @@ def view_chat():
 
     with top_left:
         title = st.session_state.get('current_session_title') or '새 대화'
-        st.markdown(
-            f"<div style='font-size:15px; font-weight:600; padding-top:4px;'>{title}</div>",
-            unsafe_allow_html=True,
-        )
+        current_sid_for_rename = st.session_state.get('current_session_id')
+        # Title behaves as a popover trigger when there's an actual saved
+        # session — gives the user an inline rename UI. Pre-session it's
+        # just static text since there's nothing to persist yet.
+        if current_sid_for_rename and hasattr(st, 'popover'):
+            with st.popover(title, use_container_width=False):
+                with st.form('_rename_form', clear_on_submit=False):
+                    new_title = st.text_input(
+                        '대화 이름',
+                        value=(st.session_state.get('current_session_title') or ''),
+                        max_chars=60,
+                        placeholder='예: 회의록 요약 / 신입사원 매뉴얼 Q&A',
+                    )
+                    submit = st.form_submit_button(
+                        '저장', use_container_width=True, type='primary',
+                    )
+                if submit:
+                    if rename_session(current_sid_for_rename, new_title):
+                        st.success('이름을 변경했습니다.')
+                        st.rerun()
+                    else:
+                        st.error('이름 변경에 실패했습니다.')
+        else:
+            st.markdown(
+                f"<div style='font-size:15px; font-weight:600; padding-top:4px;'>{title}</div>",
+                unsafe_allow_html=True,
+            )
 
     # Doc filter popover (only when multiple docs are loaded).
     if has_multi_docs and top_mid is not None and hasattr(st, 'popover'):
