@@ -4096,13 +4096,18 @@ with st.sidebar:
     prov_short = st.session_state.get('provider', '')
     if prov_short:
         st.caption(f"공급자: `{prov_short}`")
-    # If the provider's last response stamped a model id, surface it so the
-    # user can verify the request actually went where they expected (LLMs
-    # sometimes misidentify themselves; this header doesn't lie).
+    # Provider-stamped model id from the last API response — bulletproof
+    # confirmation of which model actually served the previous turn. Shown
+    # always (not only on mismatch) because LLMs misidentify themselves
+    # ("I'm Claude 3" when running Claude 4.6) and this header settles it.
     actual_model = st.session_state.get('_last_response_model')
-    if actual_model and actual_model != st.session_state.get('model'):
+    if actual_model:
         am_short = actual_model if len(actual_model) <= 36 else actual_model[:33] + '...'
-        st.caption(f"직전 응답 모델: `{am_short}`")
+        configured = st.session_state.get('model', '')
+        if actual_model == configured:
+            st.caption(f"직전 응답 (실제): `{am_short}` ✓ 일치")
+        else:
+            st.caption(f"직전 응답 (실제): `{am_short}`")
     if st.session_state.get('general_chat_mode'):
         st.caption(
             '모드: 일반 대화 (RAG 끔)'
