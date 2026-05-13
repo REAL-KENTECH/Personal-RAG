@@ -1145,14 +1145,16 @@ def log_turn_structured(user_input: str, response_text: str, reasoning: str,
         return
     path = _session_jsonl_path(sid)
 
-    # Normalize retrieved entries
+    # Normalize retrieved entries. We store only a 200-char preview plus a
+    # reference (doc_id + chunk_index) so chat_turns rows stay light — the
+    # full chunk body is in doc_chunks and can be joined back when needed.
     retrieved_records = []
     for j, r in enumerate(retrieved or [], start=1):
         rec = {
             'rank': j,
             'source': r.get('source'),
             'score': r.get('score'),
-            'text': (r.get('text') or '')[:1200],
+            'text_preview': (r.get('text') or '')[:200],
         }
         if r.get('source') == 'web':
             rec['title'] = r.get('doc')
@@ -1307,8 +1309,105 @@ def list_saved_doc_ids(embedder_id: str):
     return [p.name for p in d.iterdir() if p.is_dir() and (p / 'meta.json').exists()]
 
 
+def _restore_docs_from_pgvector(embedder_id: str) -> list:
+    """Pull every chunk this user has stored in Supabase doc_chunks and
+    rebuild the in-memory docs[] list. Used on first login from a fresh
+    Cloud container — the local .data/ tree is ephemeral, but the
+    embeddings live in pgvector and survive restarts.
+
+    Returns the rebuilt list (also persists each doc back to local disk so
+    subsequent operations don't have to re-query). Empty list on any failure
+    or when the user has no chunks yet."""
+    client = _supabase_client()
+    if client is None:
+        return []
+    mapping = _EMBEDDER_TABLE_MAP.get(embedder_id)
+    if mapping is None:
+        return []
+    short_name, vec_col, _dim = mapping
+
+    user_id = st.session_state.get('user_id', '_local')
+    try:
+        # Pull only what we need to reconstruct. Embeddings come back as
+        # the vector type — supabase-py decodes pgvector to a Python list.
+        # `.range(0, 9999)` is required because PostgREST default cap is 1000.
+        resp = (client.table('doc_chunks')
+                .select(f'doc_id, doc_name, chunk_idx, "text", pages, {vec_col}')
+                .eq('user_id', user_id)
+                .eq('embedder', short_name)
+                .order('doc_id')
+                .order('chunk_idx')
+                .range(0, 9999)
+                .execute())
+        rows = resp.data or []
+    except Exception:
+        return []
+    if not rows:
+        return []
+
+    # Group rows by doc_id, preserving chunk_idx order.
+    docs_by_id = {}
+    for r in rows:
+        did = r.get('doc_id')
+        if not did:
+            continue
+        d = docs_by_id.setdefault(did, {
+            'id': did,
+            'name': r.get('doc_name') or '',
+            'chunks': [],
+            'chunk_pages': [],
+            'embeddings_list': [],
+        })
+        d['chunks'].append(r.get('text') or '')
+        d['chunk_pages'].append(r.get('pages') or [])
+        emb = r.get(vec_col)
+        if emb is None:
+            # Vector column came back NULL — skip this row in the matrix.
+            emb = [0.0] * mapping[2]
+        d['embeddings_list'].append(emb)
+
+    rebuilt = []
+    for did, d in docs_by_id.items():
+        if not d['chunks']:
+            continue
+        embs = np.asarray(d['embeddings_list'], dtype=np.float32)
+        # Re-normalize defensively — cosine math elsewhere assumes unit
+        # length. supabase usually returns the original normalized values
+        # but converting through json + back can drift floating-point.
+        norms = np.linalg.norm(embs, axis=1, keepdims=True)
+        norms = np.where(norms > 1e-9, norms, 1.0)
+        embs = embs / norms
+
+        doc = {
+            'id': did,
+            'name': d['name'] or did,
+            'raw_text': '\n\n'.join(d['chunks']),
+            'chunks': d['chunks'],
+            'chunk_pages': d['chunk_pages'],
+            'page_count': max(
+                (max(p) for p in d['chunk_pages'] if p), default=0,
+            ),
+            'has_page_images': False,
+            'is_pdf': False,  # cannot tell from pgvector alone
+            'embeddings': embs,
+            'chunk_size': 0,
+            'chunk_overlap': 0,
+        }
+        try:
+            save_doc(embedder_id, doc)
+        except Exception:
+            # Disk save is best-effort; the in-memory doc is still usable.
+            pass
+        rebuilt.append(doc)
+
+    return rebuilt
+
+
 def load_all_for_current_embedder():
-    """Populate st.session_state['docs'] from disk for the current embedder."""
+    """Populate st.session_state['docs'] for the current embedder. Tries
+    local disk first (fast); on a fresh Cloud container the disk is empty,
+    so falls back to rebuilding from Supabase pgvector if configured.
+    Skips the work if we already loaded the same embedder this session."""
     eid = st.session_state['embedder_model']
     if st.session_state.get('_loaded_for_embedder') == eid:
         return
@@ -1317,6 +1416,15 @@ def load_all_for_current_embedder():
         d = load_doc(eid, did)
         if d is not None:
             docs.append(d)
+    # Nothing on disk → try pgvector restore for logged-in users on Cloud.
+    if not docs and _supabase_client() is not None:
+        docs = _restore_docs_from_pgvector(eid)
+        if docs:
+            _log_event('docs_restored_from_pgvector', {
+                'embedder': eid,
+                'n_docs': len(docs),
+                'n_chunks_total': sum(len(d['chunks']) for d in docs),
+            })
     st.session_state['docs'] = docs
     st.session_state['_loaded_for_embedder'] = eid
 
@@ -4563,10 +4671,12 @@ def _agent_log(task_key: str, inputs: dict, output: str, retrieved: list,
                model: str, elapsed: float):
     """Append one agent run to ./logs/agents.jsonl. Same schema family as chat
     JSONL — analysis-friendly."""
+    # Slim: 200-char preview + reference, matches log_turn_structured.
     retrieved_records = []
     for j, r in enumerate(retrieved or [], start=1):
         rec = {'rank': j, 'source': r.get('source'),
-               'score': r.get('score'), 'text': (r.get('text') or '')[:1200]}
+               'score': r.get('score'),
+               'text_preview': (r.get('text') or '')[:200]}
         if r.get('source') == 'web':
             rec['title'] = r.get('doc'); rec['url'] = r.get('url')
         else:
