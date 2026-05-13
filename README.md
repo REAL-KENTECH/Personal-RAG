@@ -168,6 +168,28 @@ git add -A && git commit -m "..." && git push
 
 설정 안 하면 앱은 그대로 동작하되 로컬 JSONL 만 씁니다 (개발 / 단일 사용자 OK, Cloud 배포 비추).
 
+### 회원가입 / 로그인 — Supabase users (선택, 다중사용자 시 추천)
+
+여러 사용자가 같은 앱을 쓰는 경우 회원가입 + 로그인을 활성화하려면:
+
+| 단계 | 작업 |
+|---|---|
+| 1 | Supabase **SQL Editor** → 본 레포의 `db_schema_users.sql` 내용을 붙여넣고 **Run** |
+| 2 | (이미 SUPABASE_URL / SUPABASE_KEY 가 secrets 에 있다면 추가 작업 없음) |
+| 3 | Manage app → Reboot |
+
+작동 방식:
+- 비밀번호는 Postgres 의 `pgcrypto` (bcrypt) 로 DB 안에서 해시 + 검증
+- 앱은 `signup_user` / `login_user` RPC 만 호출 → password_hash 가 클라이언트에 절대 노출 안 됨
+- 첫 화면이 "로그인 / 회원가입" 2탭으로 바뀌고 누구나 자가 가입 가능
+
+**활성화 우선순위 (자동 분기):**
+
+1. Supabase 가 연결돼 있으면 → Supabase users (회원가입 가능)
+2. 1번 아니고 secrets 에 `[users]` 블록이 있으면 → 관리자가 등록한 사용자만 로그인
+3. 둘 다 없고 Cloud 면 → 브라우저별 익명 UUID
+4. 로컬이면 → `_local` 단일 사용자
+
 ### pgvector 추가 — 청크 임베딩도 영속화 (선택, 강력 추천)
 
 위 기본 로깅에 더해 **문서 청크 임베딩까지** 영속화하려면 한 번 더 SQL 실행. 그러면 사용자가 올린 PDF 의 임베딩이 컨테이너 재시작 후에도 살아남고, pgvector 의 HNSW 인덱스로 더 큰 규모의 ANN 검색이 가능합니다.

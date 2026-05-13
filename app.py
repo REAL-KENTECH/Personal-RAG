@@ -211,6 +211,73 @@ def _scrub_for_postgres(obj):
     return obj
 
 
+# ---------- Supabase-backed user auth (signup/login) ----------
+# The actual passwords never reach Python. We call two SECURITY DEFINER
+# RPCs in Postgres that handle bcrypt hashing/verification, and only see
+# (success, message, user_id) back. Configure via db_schema_users.sql.
+
+def _supabase_signup(username: str, password: str) -> tuple:
+    """Returns (success: bool, message: str). Requires Supabase configured
+    and db_schema_users.sql applied."""
+    client = _supabase_client()
+    if client is None:
+        return False, 'Supabase 가 설정되지 않아 회원가입을 사용할 수 없습니다.'
+    try:
+        resp = client.rpc(
+            'signup_user',
+            {'p_username': username, 'p_password': password},
+        ).execute()
+        rows = resp.data or []
+        if not rows:
+            return False, '회원가입 처리 중 알 수 없는 오류가 발생했습니다.'
+        row = rows[0]
+        return bool(row.get('success')), str(row.get('message') or '')
+    except Exception as e:
+        msg = str(e)
+        if 'function' in msg.lower() and 'does not exist' in msg.lower():
+            return False, (
+                '회원가입 시스템이 아직 설정되지 않았습니다. '
+                'Supabase SQL Editor 에서 db_schema_users.sql 을 실행하세요.'
+            )
+        return False, f'회원가입 실패: {msg[:200]}'
+
+
+def _supabase_login(username: str, password: str) -> tuple:
+    """Returns (success: bool, message: str, user_id_in_db: int|None)."""
+    client = _supabase_client()
+    if client is None:
+        return False, 'Supabase 미설정.', None
+    try:
+        resp = client.rpc(
+            'login_user',
+            {'p_username': username, 'p_password': password},
+        ).execute()
+        rows = resp.data or []
+        if not rows:
+            return False, '로그인 처리 중 알 수 없는 오류.', None
+        row = rows[0]
+        return (
+            bool(row.get('success')),
+            str(row.get('message') or ''),
+            row.get('user_id'),
+        )
+    except Exception as e:
+        msg = str(e)
+        if 'function' in msg.lower() and 'does not exist' in msg.lower():
+            return False, (
+                '로그인 시스템이 아직 설정되지 않았습니다. '
+                'Supabase SQL Editor 에서 db_schema_users.sql 을 실행하세요.'
+            ), None
+        return False, f'로그인 실패: {msg[:200]}', None
+
+
+def _supabase_users_enabled() -> bool:
+    """True if Supabase is configured. We assume db_schema_users.sql has
+    been applied; the RPC helpers handle the "function missing" case with
+    a friendly message instead of crashing."""
+    return _supabase_client() is not None
+
+
 def _supabase_insert(table: str, record: dict) -> None:
     """Best-effort INSERT. Never raises — local JSONL remains the source of
     truth for the live container; Supabase is the durable copy. Failures are
@@ -517,32 +584,122 @@ def _render_login_screen():
             f'style="max-width:240px; height:auto; opacity:0.95;" /></div>',
             unsafe_allow_html=True,
         )
-    st.markdown(
-        '<div style="text-align:center; font-size:14px; color:rgba(128,128,128,0.9); '
-        'margin-bottom:24px;">로그인이 필요합니다.</div>',
-        unsafe_allow_html=True,
-    )
+
+    # Two distinct login backends:
+    #  1) Supabase users table (signup + login, bcrypt). Active when Supabase
+    #     is configured. New users can register themselves.
+    #  2) Legacy secrets [users] block. Admin-managed; no signup.
+    use_supabase_auth = _supabase_users_enabled()
+
+    if use_supabase_auth:
+        st.markdown(
+            '<div style="text-align:center; font-size:14px; color:rgba(128,128,128,0.9); '
+            'margin-bottom:16px;">계정으로 로그인하거나 새로 가입하세요.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div style="text-align:center; font-size:14px; color:rgba(128,128,128,0.9); '
+            'margin-bottom:24px;">로그인이 필요합니다.</div>',
+            unsafe_allow_html=True,
+        )
+
     _, form_col, _ = st.columns([1, 2, 1])
     with form_col:
-        with st.form('_login_form', clear_on_submit=False):
-            username = st.text_input('사용자 ID')
-            password = st.text_input('비밀번호', type='password')
-            submitted = st.form_submit_button(
-                '로그인', use_container_width=True, type='primary'
-            )
-        if submitted:
-            if (username in USERS_FROM_SECRETS
-                    and str(USERS_FROM_SECRETS[username]) == str(password)):
-                st.session_state['user_id'] = username
-                st.session_state['_loaded_for_embedder'] = None
-                _log_event('login', {'method': 'password', 'username': username})
-                st.rerun()
-            else:
-                _log_event('login_failed', {
-                    'method': 'password',
-                    'attempted_username': (username or '')[:64],
-                })
-                st.error('사용자 ID 또는 비밀번호가 올바르지 않습니다.')
+        if use_supabase_auth:
+            tab_login, tab_signup = st.tabs(['로그인', '회원가입'])
+            with tab_login:
+                with st.form('_login_form', clear_on_submit=False):
+                    username = st.text_input('아이디', key='login_username')
+                    password = st.text_input(
+                        '비밀번호', type='password', key='login_password',
+                    )
+                    submitted = st.form_submit_button(
+                        '로그인', use_container_width=True, type='primary',
+                    )
+                if submitted:
+                    ok, msg, _user_id = _supabase_login(username, password)
+                    if ok:
+                        st.session_state['user_id'] = (username or '').strip()
+                        st.session_state['_loaded_for_embedder'] = None
+                        _log_event('login', {
+                            'method': 'supabase',
+                            'username': st.session_state['user_id'],
+                        })
+                        st.rerun()
+                    else:
+                        _log_event('login_failed', {
+                            'method': 'supabase',
+                            'attempted_username': (username or '')[:64],
+                            'reason': msg[:200],
+                        })
+                        st.error(msg)
+            with tab_signup:
+                with st.form('_signup_form', clear_on_submit=False):
+                    new_username = st.text_input(
+                        '새 아이디 (2-64자)', key='signup_username',
+                    )
+                    new_password = st.text_input(
+                        '새 비밀번호 (6자 이상)', type='password',
+                        key='signup_password',
+                    )
+                    new_password2 = st.text_input(
+                        '비밀번호 확인', type='password',
+                        key='signup_password2',
+                    )
+                    signup_submitted = st.form_submit_button(
+                        '회원가입', use_container_width=True, type='primary',
+                    )
+                if signup_submitted:
+                    if new_password != new_password2:
+                        st.error('비밀번호 확인이 일치하지 않습니다.')
+                    else:
+                        ok, msg = _supabase_signup(new_username, new_password)
+                        if ok:
+                            # Auto-login after signup so user doesn't have to
+                            # retype credentials.
+                            ok2, _msg2, _uid = _supabase_login(
+                                new_username, new_password,
+                            )
+                            if ok2:
+                                st.session_state['user_id'] = (
+                                    (new_username or '').strip()
+                                )
+                                st.session_state['_loaded_for_embedder'] = None
+                                _log_event('signup', {
+                                    'username': st.session_state['user_id'],
+                                })
+                                _log_event('login', {
+                                    'method': 'supabase',
+                                    'username': st.session_state['user_id'],
+                                    'first_login': True,
+                                })
+                                st.success('회원가입 완료 — 자동 로그인했습니다.')
+                                st.rerun()
+                            else:
+                                st.success('회원가입 성공. 로그인 탭에서 다시 로그인해 주세요.')
+                        else:
+                            st.error(msg)
+        else:
+            with st.form('_login_form', clear_on_submit=False):
+                username = st.text_input('사용자 ID')
+                password = st.text_input('비밀번호', type='password')
+                submitted = st.form_submit_button(
+                    '로그인', use_container_width=True, type='primary',
+                )
+            if submitted:
+                if (username in USERS_FROM_SECRETS
+                        and str(USERS_FROM_SECRETS[username]) == str(password)):
+                    st.session_state['user_id'] = username
+                    st.session_state['_loaded_for_embedder'] = None
+                    _log_event('login', {'method': 'password', 'username': username})
+                    st.rerun()
+                else:
+                    _log_event('login_failed', {
+                        'method': 'password',
+                        'attempted_username': (username or '')[:64],
+                    })
+                    st.error('사용자 ID 또는 비밀번호가 올바르지 않습니다.')
     st.stop()
 
 
@@ -552,15 +709,18 @@ def _is_streamlit_cloud() -> bool:
 
 
 def _auth_gate():
-    """Resolve the active user_id:
-      - users configured in st.secrets['users'] → render login form,
-        set user_id to the verified username (persistent identity).
-      - no users configured AND deployed on Streamlit Cloud → each browser
-        session gets a fresh anonymous user_id (per-visitor isolation).
-      - no users configured AND running locally → single-tenant '_local'
-        (so a developer keeps their persisted data between reruns).
+    """Resolve the active user_id. Priority:
+      1) Supabase users (signup + login, bcrypt) — when Supabase is wired up.
+         This is the recommended setup for any shared deployment.
+      2) Legacy secrets [users] block — admin-managed, no signup.
+      3) Streamlit Cloud, no auth backend at all → anonymous per-browser UUID.
+      4) Local dev, no auth backend → single-tenant '_local'.
     """
     if 'user_id' in st.session_state and st.session_state['user_id']:
+        return
+
+    if _supabase_users_enabled():
+        _render_login_screen()
         return
 
     if USERS_FROM_SECRETS:
@@ -568,7 +728,7 @@ def _auth_gate():
         return
 
     if _is_streamlit_cloud():
-        # New visitor on a shared deployment without login → give them their
+        # New visitor on a shared deployment without auth → give them their
         # own isolated workspace for this browser session. Closing the tab
         # ends the session; previous anonymous data remains on disk under
         # its UUID until an admin cleans it up.
@@ -3437,8 +3597,10 @@ with st.sidebar:
 
     # ----- User / logout -----
     uid = st.session_state.get('user_id', '_local')
+    # Logged-in state = anything other than the anonymous/local fallbacks.
+    is_logged_in = not (uid == '_local' or uid.startswith('_anon_'))
     st.markdown('<div class="sb-section">사용자</div>', unsafe_allow_html=True)
-    if USERS_FROM_SECRETS:
+    if is_logged_in:
         st.caption(f"로그인: `{uid}`")
         if st.button('로그아웃', use_container_width=True, key='logout_btn'):
             _log_event('logout', {'username': uid})
