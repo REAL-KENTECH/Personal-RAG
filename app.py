@@ -2269,16 +2269,32 @@ def _is_hf_router_endpoint() -> bool:
     return 'router.huggingface.co' in (st.session_state.get('base_url') or '').lower()
 
 
+def _is_anthropic_endpoint() -> bool:
+    """Claude via Anthropic's OpenAI-SDK compatibility layer. Has its own
+    parameter restrictions (no top_p, no penalty fields, no top_k)."""
+    return 'api.anthropic.com' in (st.session_state.get('base_url') or '').lower()
+
+
+def _is_fireworks_endpoint() -> bool:
+    return 'fireworks.ai' in (st.session_state.get('base_url') or '').lower()
+
+
 def _provider_supports_top_k() -> bool:
     """top_k via extra_body is provider-specific. Live-tested:
       - OpenAI: rejects.
+      - Anthropic OpenAI-compat: rejects.
       - HF Router: many sub-providers reject (e.g. Cerebras for Llama-3.1-8B,
         gpt-oss-120b). Safest to omit unless DashScope/vLLM/Custom.
+      - Fireworks: rejects via extra_body.
       - DashScope (Qwen): supports.
       - vLLM/local & Custom: typically supports."""
     if _is_openai_endpoint():
         return False
+    if _is_anthropic_endpoint():
+        return False
     if _is_hf_router_endpoint():
+        return False
+    if _is_fireworks_endpoint():
         return False
     return True
 
@@ -2359,22 +2375,24 @@ def _build_completion_params(
         else:
             out['max_tokens'] = budget
 
-    # OpenAI new-tier rejects non-default sampling params; safest to omit them.
-    restrict_sampling = is_openai and (
+    # Sampling param compatibility per provider.
+    # - OpenAI gpt-5/o-series: rejects ANY non-default sampling params
+    # - Anthropic (Claude 4.x via OpenAI compat): rejects top_p, presence_penalty
+    is_anthropic = _is_anthropic_endpoint()
+    openai_strict = is_openai and (
         _is_openai_reasoning_model(model) or _is_openai_gpt5_family(model)
     )
-    if not restrict_sampling:
+    if not openai_strict:
         if temperature is not None:
             out['temperature'] = float(temperature)
-        if top_p is not None:
+        if top_p is not None and not is_anthropic:
             out['top_p'] = float(top_p)
-        if presence_penalty is not None:
+        if presence_penalty is not None and not is_anthropic:
             out['presence_penalty'] = float(presence_penalty)
 
-    # extra_body — OpenAI rejects unknown fields, our caller is responsible for
-    # not setting top_k there, but as a final safety net strip it for OpenAI.
+    # extra_body — strip provider-incompatible fields as a safety net.
     if extra_body:
-        if is_openai:
+        if is_openai or is_anthropic:
             extra_body = {k: v for k, v in extra_body.items()
                           if k not in ('top_k', 'chat_template_kwargs', 'enable_thinking')}
         if extra_body:
@@ -2394,6 +2412,13 @@ def _thinking_off_extra_body() -> dict:
     - vLLM / Custom: chat_template_kwargs is the standard way (SGLang/vLLM).
     """
     if _is_openai_endpoint():
+        return {}
+    if _is_anthropic_endpoint():
+        # Claude exposes extended thinking via a 'thinking' parameter at the
+        # native API level, but the OpenAI-compat layer ignores it. Return
+        # nothing extra to avoid 400 from unknown fields.
+        return {}
+    if _is_fireworks_endpoint():
         return {}
     if _is_dashscope_endpoint():
         return {'enable_thinking': False}
