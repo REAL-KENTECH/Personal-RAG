@@ -392,6 +392,19 @@ PROVIDERS = {
         'env_key': 'OPENAI_API_KEY',
         'default_model': 'gpt-5-mini',
     },
+    'Anthropic (Claude)': {
+        # Anthropic's OpenAI-SDK compatibility endpoint. Most chat-completions
+        # features work; tool calling and some sampling params have caveats.
+        'base_url': 'https://api.anthropic.com/v1/',
+        'env_key': 'ANTHROPIC_API_KEY',
+        'default_model': 'claude-sonnet-4-6',
+    },
+    'Fireworks AI': {
+        # OpenAI-compatible. Model ids follow accounts/fireworks/models/<name>.
+        'base_url': 'https://api.fireworks.ai/inference/v1',
+        'env_key': 'FIREWORKS_API_KEY',
+        'default_model': 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+    },
     'DashScope (Qwen)': {
         'base_url': 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
         'env_key': 'DASHSCOPE_API_KEY',
@@ -481,6 +494,37 @@ PROVIDER_MODELS = {
         'o3-mini',
         'o1',
     ],
+    'Anthropic (Claude)': [
+        # Latest Claude 4.x tier
+        'claude-opus-4-7',
+        'claude-sonnet-4-6',
+        'claude-haiku-4-5',
+        # 4.x earlier
+        'claude-opus-4-5',
+        'claude-sonnet-4-5',
+        'claude-haiku-4-1',
+        # 3.7 / 3.5 (legacy but stable)
+        'claude-3-7-sonnet-latest',
+        'claude-3-5-sonnet-latest',
+        'claude-3-5-haiku-latest',
+    ],
+    'Fireworks AI': [
+        # Llama
+        'accounts/fireworks/models/llama-v3p3-70b-instruct',
+        'accounts/fireworks/models/llama-v3p1-405b-instruct',
+        'accounts/fireworks/models/llama-v3p1-70b-instruct',
+        'accounts/fireworks/models/llama-v3p1-8b-instruct',
+        # Qwen
+        'accounts/fireworks/models/qwen2p5-72b-instruct',
+        'accounts/fireworks/models/qwen2p5-coder-32b-instruct',
+        # DeepSeek
+        'accounts/fireworks/models/deepseek-v3',
+        'accounts/fireworks/models/deepseek-r1',
+        # Mixtral
+        'accounts/fireworks/models/mixtral-8x22b-instruct',
+        # Yi
+        'accounts/fireworks/models/yi-large',
+    ],
     'DashScope (Qwen)': [
         'qwen3.6-27b',
         'qwen3-72b',
@@ -522,6 +566,8 @@ def _init_state():
         # does not overwrite a manually entered key.
         'hf_api_key': os.getenv('HF_TOKEN', ''),
         'openai_api_key': os.getenv('OPENAI_API_KEY', ''),
+        'anthropic_api_key': os.getenv('ANTHROPIC_API_KEY', ''),
+        'fireworks_api_key': os.getenv('FIREWORKS_API_KEY', ''),
         'dashscope_api_key': os.getenv('DASHSCOPE_API_KEY', ''),
         'custom_api_key': '',
 
@@ -829,7 +875,8 @@ _auth_gate()
 
 _PERSIST_KEYS = (
     'provider', 'model', 'base_url',
-    'hf_api_key', 'openai_api_key', 'dashscope_api_key', 'custom_api_key',
+    'hf_api_key', 'openai_api_key', 'anthropic_api_key', 'fireworks_api_key',
+    'dashscope_api_key', 'custom_api_key',
     'tavily_key', 'brave_key',
     'embedder_model', 'chunk_size', 'chunk_overlap',
     'retrieval_mode', 'retrieve_top_n', 'final_top_k', 'use_reranker',
@@ -1537,6 +1584,10 @@ def _active_api_key() -> str:
         return st.session_state.get('hf_api_key', '') or ''
     if p == 'OpenAI':
         return st.session_state.get('openai_api_key', '') or ''
+    if p == 'Anthropic (Claude)':
+        return st.session_state.get('anthropic_api_key', '') or ''
+    if p == 'Fireworks AI':
+        return st.session_state.get('fireworks_api_key', '') or ''
     if p == 'DashScope (Qwen)':
         return st.session_state.get('dashscope_api_key', '') or ''
     # vLLM / local / Custom
@@ -3376,38 +3427,62 @@ def _empty(text: str):
 
 
 def model_picker(label: str, key_prefix: str):
-    """Render a per-provider model dropdown with '직접 입력' fallback.
-    Reads/writes st.session_state['model']. `key_prefix` namespaces widget keys."""
+    """Per-provider model dropdown with '직접 입력' fallback.
+
+    Two-step apply: the widget value is treated as a *pending* choice;
+    only when the user presses the 적용 button do we write it into
+    st.session_state['model'] and persist. This makes the model switch
+    explicit instead of firing on every dropdown click.
+    """
     provider = st.session_state.get('provider', PROVIDER_NAMES[0])
     known = PROVIDER_MODELS.get(provider, [])
     current = st.session_state.get('model', '')
 
     if not known:
-        # No known list — just a text input.
-        st.session_state['model'] = st.text_input(
-            label, current, key=f'{key_prefix}_model_text',
+        pending = st.text_input(
+            label, value=current, key=f'{key_prefix}_model_text',
         )
-        return
+    else:
+        options = known + [_CUSTOM]
+        if current in known:
+            initial_idx = known.index(current)
+        else:
+            initial_idx = len(options) - 1   # 직접 입력
+        choice = st.selectbox(
+            label, options, index=initial_idx,
+            format_func=lambda x: '직접 입력...' if x == _CUSTOM else x,
+            key=f'{key_prefix}_model_select',
+        )
+        if choice == _CUSTOM:
+            pending = st.text_input(
+                '모델 ID 직접 입력',
+                value=current if current not in known else '',
+                key=f'{key_prefix}_model_custom',
+                placeholder='예: gpt-4o, my-org/my-finetune',
+            )
+        else:
+            pending = choice
 
-    options = known + [_CUSTOM]
-    if current in known:
-        idx = known.index(current)
-    else:
-        idx = len(options) - 1   # 직접 입력
-    choice = st.selectbox(
-        label, options, index=idx,
-        format_func=lambda x: '직접 입력...' if x == _CUSTOM else x,
-        key=f'{key_prefix}_model_select',
-    )
-    if choice == _CUSTOM:
-        st.session_state['model'] = st.text_input(
-            '모델 ID 직접 입력',
-            value=current if current not in known else '',
-            key=f'{key_prefix}_model_custom',
-            placeholder='예: gpt-4o, my-org/my-finetune',
-        )
-    else:
-        st.session_state['model'] = choice
+    # Apply / confirm row. Only shown when the user has actually changed
+    # the dropdown (or typed a different model id) from the active value.
+    if pending and pending != current:
+        cols = st.columns([3, 1])
+        with cols[0]:
+            st.caption(
+                f'미적용 변경: `{current or "—"}` → `{pending}` '
+                f'· 적용 버튼을 눌러야 채팅에 반영됩니다.'
+            )
+        with cols[1]:
+            if st.button('적용', key=f'{key_prefix}_model_apply',
+                         type='primary', use_container_width=True):
+                st.session_state['model'] = pending
+                try:
+                    _save_user_prefs()
+                except Exception:
+                    pass
+                st.rerun()
+    elif current:
+        st.caption(f'현재 모델: `{current}`')
 
 
 def _show_llm_error(e: Exception):
@@ -4207,6 +4282,20 @@ def view_settings():
             st.session_state.get('openai_api_key', ''), type='password',
             help='OpenAI (gpt-4o / gpt-5 / o3 등) 사용 시 필요. '
             '환경변수 OPENAI_API_KEY 으로도 자동 로드됨.',
+        )
+        st.session_state['anthropic_api_key'] = st.text_input(
+            _key_label('Anthropic API 키', 'Anthropic (Claude)'),
+            st.session_state.get('anthropic_api_key', ''), type='password',
+            help='Claude (claude-opus / claude-sonnet / claude-haiku) 사용 시 필요. '
+            '발급: https://console.anthropic.com/settings/keys. '
+            '환경변수 ANTHROPIC_API_KEY 으로도 자동 로드됨.',
+        )
+        st.session_state['fireworks_api_key'] = st.text_input(
+            _key_label('Fireworks API 키', 'Fireworks AI'),
+            st.session_state.get('fireworks_api_key', ''), type='password',
+            help='Fireworks AI (오픈모델 빠른 추론 서비스, Llama / Qwen / DeepSeek 등) 사용 시 필요. '
+            '발급: https://fireworks.ai/account/api-keys. '
+            '환경변수 FIREWORKS_API_KEY 으로도 자동 로드됨.',
         )
         st.session_state['dashscope_api_key'] = st.text_input(
             _key_label('DashScope API 키', 'DashScope (Qwen)'),
