@@ -1,0 +1,13 @@
+# Streamlit configuration. Committed to the repo so Cloud picks it up.
+
+[server]
+# The local-sources watcher walks every imported module on startup and prints
+# noisy ModuleNotFoundError tracebacks when transformers tries to import its
+# vision submodules (vilt / vitmatte / vitpose / yolos / zoedepth) which
+# expect torchvision. We do not need hot-reload on Cloud (new deploys come
+# from git pushes), so disable file watching entirely to silence them.
+fileWatcherType = "none"
+headless = true
+
+[browser]
+gatherUsageStats = false
