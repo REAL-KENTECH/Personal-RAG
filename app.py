@@ -4573,9 +4573,13 @@ def run_agent_task(task_key: str, inputs: dict, doc_ids_filter: list = None):
     if query.strip():
         if st.session_state['docs']:
             all_docs = st.session_state['docs']
+            # None        → use every loaded doc (selector wasn't shown)
+            # empty list  → user explicitly unchecked all → retrieve nothing
+            # subset      → filter to those doc_ids
+            # full set    → equivalent to None, skip the swap
             need_filter = (
                 doc_ids_filter is not None
-                and 0 < len(doc_ids_filter) < len(all_docs)
+                and len(doc_ids_filter) < len(all_docs)
             )
             if need_filter:
                 filt_set = set(doc_ids_filter)
@@ -4643,18 +4647,21 @@ def view_agents():
     inputs = {}
     selected_doc_ids = None
     with st.form(f'agent_form_{selected}'):
-        # Per-task document subset selector (only when ≥2 docs are loaded
-        # and the task actually uses documents).
-        if task.get('requires_docs') and len(st.session_state['docs']) >= 2:
+        # Per-task document subset selector. Shown whenever the user has
+        # 2+ documents loaded — every agent task uses retrieved chunks, so
+        # the choice "which docs do you want this draft to lean on" is
+        # always meaningful even when requires_docs=False (e.g. email).
+        if len(st.session_state['docs']) >= 2:
             doc_id_to_name = {d['id']: d['name'] for d in st.session_state['docs']}
             all_ids = list(doc_id_to_name.keys())
             selected_doc_ids = st.multiselect(
-                '사용할 문서',
+                '참고할 문서',
                 options=all_ids,
                 default=all_ids,
                 format_func=lambda did: doc_id_to_name[did],
-                help='기본은 전체 문서. 일부만 사용하려면 체크를 조정하세요. '
-                '비교 분석을 두 문서로 좁히고 싶을 때 특히 유용합니다.',
+                help='이 작업이 검색·인용할 문서를 선택합니다. 기본은 전체 문서. '
+                '특정 문서만 골라 좁히면 응답이 더 정확해집니다. '
+                '문서가 1개라면 선택지가 없으니 자동 사용됩니다.',
             )
 
         for f in task['fields']:
