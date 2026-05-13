@@ -190,14 +190,19 @@ def _supabase_client():
 
 def _supabase_insert(table: str, record: dict) -> None:
     """Best-effort INSERT. Never raises — local JSONL remains the source of
-    truth for the live container; Supabase is the durable copy."""
+    truth for the live container; Supabase is the durable copy. Failures are
+    tracked in session_state so the cache tab can surface them instead of
+    leaving the user wondering why rows aren't appearing."""
     client = _supabase_client()
     if client is None:
         return
+    st.session_state['_sb_attempts'] = st.session_state.get('_sb_attempts', 0) + 1
     try:
         client.table(table).insert(record).execute()
-    except Exception:
-        pass
+        st.session_state['_sb_successes'] = st.session_state.get('_sb_successes', 0) + 1
+    except Exception as e:
+        st.session_state['_sb_failures'] = st.session_state.get('_sb_failures', 0) + 1
+        st.session_state['_sb_last_err'] = f'{table}: {type(e).__name__}: {str(e)[:600]}'
 
 
 def _log_event(event_type: str, payload: dict = None) -> None:
@@ -3330,10 +3335,82 @@ def view_cache():
 
     # ----- Persistent logging status (Supabase) -----
     if _supabase_client() is not None:
-        st.success(
-            '영속 로깅: Supabase Postgres 에 동시 기록 중 — '
-            '컨테이너가 재시작되어도 모든 채팅 / 에이전트 / 이벤트가 보존됩니다.'
-        )
+        attempts = st.session_state.get('_sb_attempts', 0)
+        successes = st.session_state.get('_sb_successes', 0)
+        failures = st.session_state.get('_sb_failures', 0)
+        last_err = st.session_state.get('_sb_last_err')
+
+        if failures == 0 and attempts > 0:
+            st.success(
+                f'영속 로깅: Supabase Postgres 정상 — '
+                f'이 세션 INSERT {successes}/{attempts} 성공. '
+                f'컨테이너 재시작되어도 보존됩니다.'
+            )
+        elif failures == 0 and attempts == 0:
+            st.info(
+                '영속 로깅: Supabase 연결됨, 아직 이 세션에서 INSERT 시도 없음. '
+                '아래 진단 버튼으로 즉시 테스트해보세요.'
+            )
+        else:
+            st.error(
+                f'영속 로깅 연결됐으나 INSERT 실패 중 — {failures}/{attempts} 실패. '
+                '대부분의 원인: RLS(Row-Level Security) 또는 스키마 누락.'
+            )
+            if last_err:
+                with st.expander('마지막 INSERT 실패 메시지 보기', expanded=True):
+                    st.code(last_err)
+
+        # 1-click round-trip test: INSERT a probe row and immediately DELETE it.
+        if st.button(
+            'Supabase 연결 진단 (INSERT + DELETE 1행)',
+            use_container_width=False,
+            key='sb_diagnose_btn',
+        ):
+            import time as _t
+            client = _supabase_client()
+            probe = {
+                'event_type': 'diagnostic_probe',
+                'user_id': st.session_state.get('user_id', '_local'),
+                'payload': {'ts': _t.time(), 'note': '캐시 탭 진단 버튼'},
+            }
+            try:
+                ins = client.table('events').insert(probe).execute()
+                ins_id = (ins.data[0]['id']
+                          if getattr(ins, 'data', None) and ins.data else None)
+                st.success(
+                    f'INSERT 성공: events 테이블에 id={ins_id} 추가됨. '
+                    f'아래에서 자동 정리 중...'
+                )
+                if ins_id is not None:
+                    try:
+                        client.table('events').delete().eq('id', ins_id).execute()
+                        st.info(f'정리 완료: id={ins_id} 삭제됨. DB는 정상 작동 중.')
+                    except Exception as de:
+                        st.warning(
+                            f'INSERT 는 됐는데 DELETE 실패 ({de}). '
+                            f'테이블에 진단 행 1개 남아있을 수 있음 — Table Editor 에서 수동 삭제 가능.'
+                        )
+            except Exception as e:
+                st.error(f'INSERT 실패: {type(e).__name__}')
+                st.code(str(e)[:1500])
+                msg = str(e).lower()
+                if 'row-level security' in msg or 'rls' in msg or 'policy' in msg:
+                    st.markdown(
+                        '**원인: RLS 가 막고 있음.** Supabase SQL Editor 에서 한 번 실행:\n\n'
+                        '```sql\n'
+                        'alter table public.events     disable row level security;\n'
+                        'alter table public.chat_turns disable row level security;\n'
+                        'alter table public.agent_runs disable row level security;\n'
+                        '```'
+                    )
+                elif 'does not exist' in msg or '42p01' in msg:
+                    st.markdown(
+                        '**원인: 테이블이 없음.** Supabase SQL Editor 에서 `db_schema.sql` 내용을 실행하세요.'
+                    )
+                elif '401' in msg or '403' in msg or 'unauthorized' in msg:
+                    st.markdown(
+                        '**원인: 키 권한 문제.** Settings → Secrets 의 `SUPABASE_KEY` 가 anon public 키인지 확인.'
+                    )
     else:
         if _is_streamlit_cloud():
             st.warning(
