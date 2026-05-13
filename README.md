@@ -183,6 +183,21 @@ git add -A && git commit -m "..." && git push
 - 앱은 `signup_user` / `login_user` RPC 만 호출 → password_hash 가 클라이언트에 절대 노출 안 됨
 - 첫 화면이 "로그인 / 회원가입" 2탭으로 바뀌고 누구나 자가 가입 가능
 
+**API 키 / 설정 자동 동기화 (선택, 회원가입 사용 시 적극 추천):**
+
+로그인한 사용자가 API 키 · 모델 선택 · 검색 설정을 매번 새로 입력하지 않도록 Supabase 에 동기화하려면:
+
+| 단계 | 작업 |
+|---|---|
+| 1 | Supabase **SQL Editor** → 본 레포의 `db_schema_preferences.sql` 내용 통째로 붙여넣고 **Run** |
+| 2 | (앱은 자동으로 감지) 로그인 후 설정 한 번이라도 변경 → Supabase 의 `user_preferences` 테이블에 upsert |
+| 3 | 컨테이너 재시작 / 다른 기기 로그인 → 자동 복원 |
+
+내부 동작:
+- `user_preferences (user_id, prefs jsonb, updated_at)` 테이블에 사용자별 prefs 통합 저장
+- `get_prefs` / `set_prefs` 2개 RPC 만 anon 에 노출 — 테이블 직접 접근은 불가
+- 보안: API 키는 plaintext 저장 (anon 키가 Streamlit Secrets 에만 있다는 가정). 대규모 배포 시 Supabase Auth 마이그 권장
+
 **활성화 우선순위 (자동 분기):**
 
 1. Supabase 가 연결돼 있으면 → Supabase users (회원가입 가능)

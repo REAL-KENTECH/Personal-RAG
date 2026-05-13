@@ -278,6 +278,63 @@ def _supabase_users_enabled() -> bool:
     return _supabase_client() is not None
 
 
+def _should_sync_prefs_to_supabase() -> bool:
+    """Sync prefs to Supabase only when a user has a stable identity. Anon
+    UUIDs change each visit so syncing them wastes DB writes for no
+    benefit; logged-in usernames and the local-dev `_local` slot are fine."""
+    client = _supabase_client()
+    if client is None:
+        return False
+    uid = st.session_state.get('user_id', '')
+    if not uid or uid.startswith('_anon_'):
+        return False
+    return True
+
+
+def _supabase_load_prefs() -> dict:
+    """Return this user's prefs blob from Supabase, or {} if none / error.
+    Designed to extend (not replace) whatever the disk file already gave us:
+    callers should merge with disk dict, Supabase wins on conflicts."""
+    if not _should_sync_prefs_to_supabase():
+        return {}
+    client = _supabase_client()
+    uid = st.session_state['user_id']
+    try:
+        resp = client.rpc('get_prefs', {'p_user_id': uid}).execute()
+        # rpc on a scalar-returning function gives us the value directly
+        data = resp.data
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, str) and data:
+            try:
+                return json.loads(data)
+            except Exception:
+                return {}
+        return {}
+    except Exception:
+        return {}
+
+
+def _supabase_save_prefs(prefs: dict) -> None:
+    """Upsert prefs blob. Best-effort; failures don't break the local save."""
+    if not _should_sync_prefs_to_supabase():
+        return
+    client = _supabase_client()
+    uid = st.session_state['user_id']
+    try:
+        client.rpc(
+            'set_prefs',
+            {'p_user_id': uid, 'p_prefs': _scrub_for_postgres(prefs)},
+        ).execute()
+    except Exception as e:
+        # Don't loop noise — record once per session.
+        if not st.session_state.get('_prefs_sync_warned'):
+            st.session_state['_prefs_sync_warned'] = True
+            st.session_state['_prefs_sync_last_err'] = (
+                f'{type(e).__name__}: {str(e)[:300]}'
+            )
+
+
 def _supabase_insert(table: str, record: dict) -> None:
     """Best-effort INSERT. Never raises — local JSONL remains the source of
     truth for the live container; Supabase is the durable copy. Failures are
@@ -789,7 +846,10 @@ def _user_prefs_path() -> Path:
 
 def _load_user_prefs():
     """Override session_state defaults with whatever was last saved for this
-    user. Env / secrets values stay in session_state until disk overrides them.
+    user. Tries disk first (fast, available locally), then merges in
+    Supabase prefs (survives Cloud container restarts and follows the user
+    across devices). Supabase values win on conflict — they are the
+    authoritative source for logged-in users.
 
     Crucial: this must run only ONCE per Streamlit session. Otherwise every
     rerun (e.g. when a sidebar button sets active_view='settings') would
@@ -801,15 +861,22 @@ def _load_user_prefs():
     """
     if st.session_state.get('_prefs_loaded'):
         return
+
+    data = {}
+
+    # Disk first — present on warm Cloud container or local dev.
     p = _user_prefs_path()
-    if not p.exists():
-        st.session_state['_prefs_loaded'] = True
-        return
-    try:
-        data = json.loads(p.read_text())
-    except Exception:
-        st.session_state['_prefs_loaded'] = True
-        return
+    if p.exists():
+        try:
+            data = json.loads(p.read_text())
+        except Exception:
+            data = {}
+
+    # Supabase next — wins on conflict so cross-device sync works.
+    sb_prefs = _supabase_load_prefs()
+    if isinstance(sb_prefs, dict) and sb_prefs:
+        data.update(sb_prefs)
+
     for k in _PERSIST_KEYS:
         if k not in data:
             continue
@@ -845,7 +912,10 @@ def _load_user_prefs():
 
 
 def _save_user_prefs():
-    """Write current configurable session_state to disk if anything changed."""
+    """Persist current configurable session_state. Writes to local disk
+    (fast, works offline) AND to Supabase user_preferences (survives
+    container restarts, follows the user across devices). Each side is
+    best-effort; if one fails the other still happened."""
     data = {k: st.session_state.get(k) for k in _PERSIST_KEYS}
     try:
         encoded = json.dumps(data, ensure_ascii=False, default=str, sort_keys=True)
@@ -855,9 +925,10 @@ def _save_user_prefs():
         return
     try:
         _user_prefs_path().write_text(encoded)
-        st.session_state['_prefs_snapshot'] = encoded
     except Exception:
         pass
+    _supabase_save_prefs(data)
+    st.session_state['_prefs_snapshot'] = encoded
 
 
 _load_user_prefs()
