@@ -2606,32 +2606,34 @@ def view_settings():
         # label marks which one is sent to the LLM for the current provider.
         active_p = st.session_state.get('provider', 'Hugging Face Router')
 
-        def _key_label(name, env_name, owner):
-            tag = ' (사용 중)' if owner == active_p else ''
-            return f'{name} ({env_name}){tag}'
+        def _key_label(name, owner):
+            return f'{name} (사용 중)' if owner == active_p else name
 
         st.markdown('**API 키 (공급자별로 따로 저장)**')
         st.session_state['hf_api_key'] = st.text_input(
-            _key_label('Hugging Face 토큰', 'HF_TOKEN', 'Hugging Face Router'),
+            _key_label('Hugging Face 토큰', 'Hugging Face Router'),
             st.session_state.get('hf_api_key', ''), type='password',
-            help='Hugging Face Router (gemma / DeepSeek / Qwen 등) 사용 시 필요.',
+            help='Hugging Face Router (Gemma / DeepSeek / Qwen 등) 사용 시 필요. '
+            '환경변수 HF_TOKEN 으로도 자동 로드됨.',
         )
         st.session_state['openai_api_key'] = st.text_input(
-            _key_label('OpenAI API 키', 'OPENAI_API_KEY', 'OpenAI'),
+            _key_label('OpenAI API 키', 'OpenAI'),
             st.session_state.get('openai_api_key', ''), type='password',
-            help='OpenAI (gpt-4o / gpt-5 / o3 등) 사용 시 필요.',
+            help='OpenAI (gpt-4o / gpt-5 / o3 등) 사용 시 필요. '
+            '환경변수 OPENAI_API_KEY 으로도 자동 로드됨.',
         )
         st.session_state['dashscope_api_key'] = st.text_input(
-            _key_label('DashScope API 키', 'DASHSCOPE_API_KEY', 'DashScope (Qwen)'),
+            _key_label('DashScope API 키', 'DashScope (Qwen)'),
             st.session_state.get('dashscope_api_key', ''), type='password',
-            help='Alibaba DashScope (Qwen 공식 API) 사용 시 필요.',
+            help='Alibaba DashScope (Qwen 공식 API) 사용 시 필요. '
+            '환경변수 DASHSCOPE_API_KEY 으로도 자동 로드됨.',
         )
         st.session_state['custom_api_key'] = st.text_input(
-            _key_label('Custom / vLLM 키', '', 'vLLM / local')
+            _key_label('Custom / vLLM 키', 'vLLM / local')
             if active_p in ('vLLM / local', 'Custom')
             else 'Custom / vLLM 키',
             st.session_state.get('custom_api_key', ''), type='password',
-            help='vLLM 등 셀프 호스팅 / 직접 입력하는 OpenAI-호환 엔드포인트용.',
+            help='vLLM 등 셀프 호스팅 / 직접 지정한 OpenAI-호환 엔드포인트용.',
         )
         st.session_state['stream'] = st.checkbox(
             '스트리밍 응답', value=st.session_state['stream'],
