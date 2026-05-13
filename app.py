@@ -509,9 +509,11 @@ PROVIDER_MODELS = {
         'claude-3-5-haiku-latest',
     ],
     'Fireworks AI': [
+        # NOTE: model IDs change occasionally on Fireworks; some require
+        # account tier upgrades (e.g. 405B). If you get 404 NOT_FOUND check
+        # the current list at https://fireworks.ai/models.
         # Llama
         'accounts/fireworks/models/llama-v3p3-70b-instruct',
-        'accounts/fireworks/models/llama-v3p1-405b-instruct',
         'accounts/fireworks/models/llama-v3p1-70b-instruct',
         'accounts/fireworks/models/llama-v3p1-8b-instruct',
         # Qwen
@@ -522,8 +524,6 @@ PROVIDER_MODELS = {
         'accounts/fireworks/models/deepseek-r1',
         # Mixtral
         'accounts/fireworks/models/mixtral-8x22b-instruct',
-        # Yi
-        'accounts/fireworks/models/yi-large',
     ],
     'DashScope (Qwen)': [
         'qwen3.6-27b',
@@ -3716,6 +3716,25 @@ def _show_llm_error(e: Exception):
         )
         return
 
+    # Fireworks AI — 모델 ID 오타 또는 계정 권한 부족
+    if (_is_fireworks_endpoint() and
+            ('not found' in el or 'inaccessible' in el or 'not deployed' in el)):
+        show(
+            'Fireworks 에서 이 모델을 찾을 수 없거나 계정에 접근 권한이 없습니다.',
+            """
+**해결 방법:**
+
+1. **모델 ID 오타 확인** — Fireworks 모델 ID 는 항상 `accounts/fireworks/models/<name>` 풀 경로. 짧은 이름만 적으면 안 됩니다.
+2. **계정 등급 제한** — Llama 405B 같은 일부 대형 모델은 유료 등급 / 신청 필요. 무료 계정에서는 70B 이하 권장.
+3. **권장 동작 모델:** 설정 → Fireworks AI 모델 드롭다운에서:
+   - `accounts/fireworks/models/llama-v3p3-70b-instruct` (기본)
+   - `accounts/fireworks/models/qwen2p5-72b-instruct` (한국어 우수)
+   - `accounts/fireworks/models/deepseek-v3` (강력)
+4. 현재 본인 계정에서 호출 가능한 모델 전체 목록: https://fireworks.ai/models
+            """,
+        )
+        return
+
     # Provider 미지원 / 모델 deploy 안 됨
     if 'not supported by any provider' in el or 'model_not_supported' in el:
         show(
@@ -4458,58 +4477,106 @@ def view_settings():
                 st.session_state['provider'] = new_provider
             model_picker('모델', key_prefix='settings')
 
-        # API keys — collapsed into one card with a master "API 키" header.
+        # API keys — staged via pending state. Typing into a field doesn't
+        # touch session_state[<active_key>] until the user presses 저장.
+        # That keeps every keystroke from triggering _save_user_prefs and
+        # the disk/Supabase round-trips it carries, and gives the user a
+        # clear "I'm done editing" moment.
         with st.container(border=True):
             st.markdown('##### API 키')
             st.caption(
-                '공급자별로 따로 저장됩니다. "(사용 중)" 마크가 현재 공급자의 키.'
+                '공급자별로 따로 저장됩니다. "(사용 중)" 표시가 현재 공급자 키. '
+                '입력 후 아래 **저장** 버튼을 눌러야 반영됩니다.'
             )
 
             def _key_label(name, owner):
                 return f'{name} (사용 중)' if owner == active_p else name
 
+            _key_specs = [
+                ('hf_api_key',         'Hugging Face',         'Hugging Face Router',
+                 'hf_...',
+                 'HF Inference Router (Gemma / DeepSeek / Qwen 등). '
+                 'fine-grained 토큰 권장: https://huggingface.co/settings/tokens'),
+                ('openai_api_key',     'OpenAI',               'OpenAI',
+                 'sk-...',
+                 'gpt-4o / gpt-5 / o3 등. https://platform.openai.com/api-keys'),
+                ('anthropic_api_key',  'Anthropic (Claude)',   'Anthropic (Claude)',
+                 'sk-ant-...',
+                 'Claude 4.x. https://console.anthropic.com/settings/keys'),
+                ('fireworks_api_key',  'Fireworks AI',         'Fireworks AI',
+                 'fw_...',
+                 '오픈모델 빠른 추론. https://fireworks.ai/account/api-keys'),
+                ('dashscope_api_key',  'DashScope (Qwen)',     'DashScope (Qwen)',
+                 'sk-...',
+                 'Qwen 공식 API.'),
+                ('custom_api_key',     'Custom / vLLM',        'vLLM / local',
+                 '(self-host endpoint key)',
+                 'vLLM 등 셀프 호스팅 / Custom OpenAI-호환 endpoint.'),
+            ]
+
             kc1, kc2 = st.columns(2)
-            with kc1:
-                st.session_state['hf_api_key'] = st.text_input(
-                    _key_label('Hugging Face', 'Hugging Face Router'),
-                    st.session_state.get('hf_api_key', ''), type='password',
-                    placeholder='hf_...',
-                    help='HF Inference Router (Gemma / DeepSeek / Qwen 등). '
-                    'fine-grained 토큰 권장: https://huggingface.co/settings/tokens',
+            for i, (active_key, label_text, owner, ph, help_text) in enumerate(_key_specs):
+                col = kc1 if i % 2 == 0 else kc2
+                pending_key = f'_pending_{active_key}'
+                # First-time render: seed widget value from active key so
+                # the field shows existing key. Streamlit retains pending
+                # value across reruns via key=.
+                if pending_key not in st.session_state:
+                    st.session_state[pending_key] = st.session_state.get(active_key, '')
+                with col:
+                    st.text_input(
+                        _key_label(label_text, owner),
+                        type='password',
+                        placeholder=ph,
+                        help=help_text,
+                        key=pending_key,
+                    )
+
+            # Apply / reset row — only show when any pending differs from active.
+            pending_changes = [
+                (active_key, label_text)
+                for active_key, label_text, *_ in _key_specs
+                if st.session_state.get(f'_pending_{active_key}', '') !=
+                   (st.session_state.get(active_key, '') or '')
+            ]
+            if pending_changes:
+                names = ', '.join(lt for _, lt in pending_changes)
+                a1, a2, a3 = st.columns([3, 1, 1])
+                with a1:
+                    st.caption(
+                        f'변경 대기: {names}. 저장을 눌러야 모델 호출에 반영됩니다.'
+                    )
+                with a2:
+                    if st.button(
+                        '취소', key='api_keys_reset',
+                        use_container_width=True,
+                    ):
+                        for active_key, *_ in _key_specs:
+                            st.session_state[f'_pending_{active_key}'] = (
+                                st.session_state.get(active_key, '')
+                            )
+                        st.rerun()
+                with a3:
+                    if st.button(
+                        '저장', key='api_keys_apply',
+                        type='primary', use_container_width=True,
+                    ):
+                        for active_key, *_ in _key_specs:
+                            st.session_state[active_key] = (
+                                st.session_state.get(f'_pending_{active_key}', '')
+                            )
+                        try:
+                            _save_user_prefs()
+                        except Exception:
+                            pass
+                        st.rerun()
+            else:
+                # 모든 키가 active 와 일치 → 변경 사항 없음
+                set_count = sum(
+                    1 for active_key, *_ in _key_specs
+                    if (st.session_state.get(active_key, '') or '').strip()
                 )
-                st.session_state['openai_api_key'] = st.text_input(
-                    _key_label('OpenAI', 'OpenAI'),
-                    st.session_state.get('openai_api_key', ''), type='password',
-                    placeholder='sk-...',
-                    help='gpt-4o / gpt-5 / o3 등. https://platform.openai.com/api-keys',
-                )
-                st.session_state['anthropic_api_key'] = st.text_input(
-                    _key_label('Anthropic (Claude)', 'Anthropic (Claude)'),
-                    st.session_state.get('anthropic_api_key', ''), type='password',
-                    placeholder='sk-ant-...',
-                    help='Claude 4.x. https://console.anthropic.com/settings/keys',
-                )
-            with kc2:
-                st.session_state['fireworks_api_key'] = st.text_input(
-                    _key_label('Fireworks AI', 'Fireworks AI'),
-                    st.session_state.get('fireworks_api_key', ''), type='password',
-                    placeholder='fw_...',
-                    help='오픈모델 빠른 추론. https://fireworks.ai/account/api-keys',
-                )
-                st.session_state['dashscope_api_key'] = st.text_input(
-                    _key_label('DashScope (Qwen)', 'DashScope (Qwen)'),
-                    st.session_state.get('dashscope_api_key', ''), type='password',
-                    placeholder='sk-...',
-                    help='Qwen 공식 API.',
-                )
-                st.session_state['custom_api_key'] = st.text_input(
-                    _key_label('Custom / vLLM', 'vLLM / local')
-                    if active_p in ('vLLM / local', 'Custom')
-                    else 'Custom / vLLM',
-                    st.session_state.get('custom_api_key', ''), type='password',
-                    placeholder='(self-host endpoint key)',
-                    help='vLLM 등 셀프 호스팅 / Custom OpenAI-호환 endpoint.',
-                )
+                st.caption(f'현재 {set_count}/{len(_key_specs)} 개의 키가 저장돼 있습니다.')
 
     # ============== RAG 검색 ==============
     with tab_search:
