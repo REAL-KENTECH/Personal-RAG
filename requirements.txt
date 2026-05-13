@@ -6,6 +6,9 @@ sentence-transformers>=2.7
 huggingface_hub
 pypdf
 python-docx
+pymupdf
+pytesseract
+Pillow
 rank_bm25
 ddgs
 requests
