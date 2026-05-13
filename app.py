@@ -1237,11 +1237,21 @@ def _build_completion_params(
 
 def _thinking_off_extra_body() -> dict:
     """Return extra_body that disables thinking, branched by provider.
-    OpenAI has no thinking mode and rejects unknown fields, so return {} there."""
+
+    - OpenAI: no thinking concept; rejects unknown fields → {}.
+    - HF Router: providers vary; Cerebras-served models (Llama-3.1-8B,
+      gpt-oss, etc.) reject chat_template_kwargs with HTTP 400. Safer to
+      omit; thinking-capable models on the router will still emit <think>
+      tags which we parse out in split_thinking().
+    - DashScope (Qwen): uses enable_thinking directly in extra_body.
+    - vLLM / Custom: chat_template_kwargs is the standard way (SGLang/vLLM).
+    """
     if _is_openai_endpoint():
         return {}
     if _is_dashscope_endpoint():
         return {'enable_thinking': False}
+    if _is_hf_router_endpoint():
+        return {}
     return {'chat_template_kwargs': {'enable_thinking': False}}
 
 
@@ -2092,8 +2102,10 @@ def handle_chat_turn(user_input: str):
         if not st.session_state['enable_thinking']:
             if is_dashscope:
                 extra_body['enable_thinking'] = False
-            elif not is_openai:
-                # vLLM / SGLang / HF Router (some providers honor this, others ignore)
+            elif not is_openai and not _is_hf_router_endpoint():
+                # vLLM / SGLang / self-hosted only. HF Router providers vary
+                # and several (e.g. Cerebras-served Llama / gpt-oss) reject
+                # chat_template_kwargs with HTTP 400.
                 extra_body['chat_template_kwargs'] = {'enable_thinking': False}
 
         params = _build_completion_params(
@@ -2965,7 +2977,7 @@ def _agent_run_llm(messages: list, model: str):
     if not st.session_state['enable_thinking']:
         if _is_dashscope_endpoint():
             extra_body['enable_thinking'] = False
-        elif not _is_openai_endpoint():
+        elif not _is_openai_endpoint() and not _is_hf_router_endpoint():
             extra_body['chat_template_kwargs'] = {'enable_thinking': False}
 
     params = _build_completion_params(
