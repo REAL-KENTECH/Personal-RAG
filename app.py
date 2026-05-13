@@ -291,6 +291,9 @@ PROVIDER_NAMES = list(PROVIDERS.keys())
 _CUSTOM = '__custom__'
 PROVIDER_MODELS = {
     'Hugging Face Router': [
+        # Korean-native — strongest 한국어 이해/생성
+        'LGAI-EXAONE/EXAONE-4.5-33B',
+        'naver-hyperclovax/HyperCLOVAX-SEED-Think-32B',
         # DeepSeek — flagship general purpose
         'deepseek-ai/DeepSeek-V4-Pro',
         'deepseek-ai/DeepSeek-V4-Flash',
@@ -2537,7 +2540,12 @@ def agentic_chat_pass(client, params: dict, initial_retrieved: list,
     for iteration in range(max_iters):
         try:
             tools_params['messages'] = messages
-            resp = client.chat.completions.create(**tools_params)
+            spinner_msg = (
+                '생각 중…' if iteration == 0
+                else f'추가 검색 결과 분석 중… (라운드 {iteration})'
+            )
+            with st.spinner(spinner_msg):
+                resp = client.chat.completions.create(**tools_params)
         except Exception:
             # Provider/model rejects tools — fall back to plain non-stream.
             fallback = {k: v for k, v in params.items() if k not in ('stream',)}
@@ -2621,8 +2629,18 @@ def agentic_chat_pass(client, params: dict, initial_retrieved: list,
 
 
 def stream_chat(client, params: dict):
-    """Stream response. Returns (full_text, reasoning_text)."""
+    """Stream response. Returns (full_text, reasoning_text).
+
+    Renders an immediate "생각 중…" placeholder so the user can tell the
+    difference between "model is thinking" and "app is hung". The
+    placeholder updates each second with an elapsed-time counter while
+    we wait for the first visible token (reasoning models like
+    HyperCLOVAX-Think can take 10s+ before they emit anything)."""
+    import time as _time
     placeholder = st.empty()
+    placeholder.markdown('_생각 중…_')
+    t0 = _time.time()
+    last_idle_tick = t0
     full_text = ''
     reasoning_text = ''
     try:
@@ -2640,9 +2658,22 @@ def stream_chat(client, params: dict):
             if full_text:
                 placeholder.markdown(full_text)
             elif reasoning_text:
-                placeholder.markdown(f'_(생각 중)_\n\n> {reasoning_text}')
+                elapsed = int(_time.time() - t0)
+                suffix = f' ({elapsed}초 경과)' if elapsed >= 2 else ''
+                placeholder.markdown(
+                    f'_생각 중{suffix}_\n\n> {reasoning_text}'
+                )
+            else:
+                # No visible output yet — refresh the elapsed counter so
+                # users can tell the connection isn't frozen.
+                now = _time.time()
+                if now - last_idle_tick >= 1.0:
+                    placeholder.markdown(
+                        f'_생각 중… ({int(now - t0)}초 경과)_'
+                    )
+                    last_idle_tick = now
         placeholder.empty()
-    except Exception as e:
+    except Exception:
         placeholder.empty()
         raise
     return full_text, reasoning_text
@@ -3026,7 +3057,7 @@ def handle_chat_turn(user_input: str):
             elif st.session_state['stream']:
                 full_text, reasoning_text = stream_chat(client, params)
             else:
-                with st.spinner('응답 생성 중...'):
+                with st.spinner('생각 중…'):
                     full_text, reasoning_text = non_stream_chat(client, params)
             elapsed_sec = _time.time() - _t0
         except Exception as e:
