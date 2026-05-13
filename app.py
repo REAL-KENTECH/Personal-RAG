@@ -2626,6 +2626,9 @@ def view_settings():
             _key_label('Hugging Face 토큰', 'Hugging Face Router'),
             st.session_state.get('hf_api_key', ''), type='password',
             help='Hugging Face Router (Gemma / DeepSeek / Qwen 등) 사용 시 필요. '
+            '권한: "Make calls to Inference Providers" 필수. '
+            'Llama/Gemma 같이 gated 모델 쓰면 해당 모델의 gated 읽기 권한도 추가. '
+            'fine-grained 토큰 권장 (https://huggingface.co/settings/tokens). '
             '환경변수 HF_TOKEN 으로도 자동 로드됨.',
         )
         st.session_state['openai_api_key'] = st.text_input(

@@ -37,6 +37,48 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 streamlit run app.py
 ```
 
+## API 토큰 발급 가이드
+
+### Hugging Face 토큰 (`HF_TOKEN`)
+
+**용도:** Hugging Face Inference Router 경유 모든 모델 호출 (Gemma 4, DeepSeek, Qwen3, Llama 등).
+
+**발급 위치:** https://huggingface.co/settings/tokens → **New token** → **Fine-grained** 추천 (least privilege)
+
+**필요한 권한 (fine-grained 기준):**
+
+| 권한 | 필수 여부 | 설명 |
+|---|---|---|
+| **Make calls to Inference Providers** | ✓ 필수 | 라우터를 통한 모든 LLM 호출의 핵심 권한 |
+| **Make calls to the serverless Inference API** | 권장 | 일부 모델이 구 Inference API 경로 사용 |
+| **Read access to public repositories** | ✓ 자동 포함 | 임베딩 모델 / reranker 가중치 다운로드 |
+| **Read access to selected gated repositories** | 선택 | Llama, Gemma 등 라이선스 수락 후 접근하는 모델용. 해당 모델 페이지에서 라이선스 수락 후 토큰의 gated 권한에 추가 |
+| **Write 권한** | ✗ 불필요 | 우리 앱은 push/comment 안 함 |
+
+**Classic 토큰을 쓴다면:** `read` scope 하나면 동작. 단 권한이 광범위해 보안상 fine-grained 권장.
+
+### Inference Provider 활성화 (별도)
+
+토큰 권한과는 별개로, https://huggingface.co/settings/inference-providers 에서 **사용하려는 provider**(Together AI · Fireworks · Cerebras · Hyperbolic 등)를 활성화해야 합니다. 무료 크레딧 있는 provider도 많음. 모델 페이지 우측 "Inference Providers" 박스에서 어떤 provider가 그 모델을 서빙하는지 확인 가능.
+
+### OpenAI API 키 (`OPENAI_API_KEY`)
+
+**발급:** https://platform.openai.com/api-keys → **Create new secret key**
+
+**권한:** OpenAI는 키 단위 권한이 단순합니다. 프로젝트 단위 권한 분리 원하면 "Project key" 사용 (특정 프로젝트 모델만 호출 가능).
+
+### DashScope (Qwen 공식) 키 (`DASHSCOPE_API_KEY`, 선택)
+
+**발급:** Alibaba Cloud Model Studio (https://bailian.console.alibabacloud.com/) — 결제 등록 필요. Qwen 공식 API 쓸 때만.
+
+### Tavily / Brave 키 (웹 검색용, 선택)
+
+- **Tavily:** https://tavily.com — 가입 시 월 1000건 무료
+- **Brave Search API:** https://brave.com/search/api/ — 무료 티어 2000건/월
+- **DuckDuckGo는 키 불필요** (기본값)
+
+---
+
 ## Streamlit Community Cloud 배포
 
 ### 사전 준비

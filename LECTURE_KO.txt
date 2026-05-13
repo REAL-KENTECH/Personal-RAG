@@ -414,6 +414,37 @@ chatbot_demo/
   git push -u origin main
   git remote set-url origin "https://github.com/<USER>/<REPO>.git"   # 토큰 청소
 
+[2.5단계] HF / OpenAI 토큰 권한 가이드
+
+  Hugging Face 토큰 (HF_TOKEN):
+    발급: https://huggingface.co/settings/tokens
+    형식: fine-grained 권장 (Classic 'read'도 가능하지만 권한 범위 큼)
+    필수 권한 (fine-grained):
+      ✓ Make calls to Inference Providers
+        — 라우터 경유 모든 LLM 호출의 핵심
+      ✓ Make calls to the serverless Inference API
+        — 일부 모델이 구경로 사용
+      ✓ Read access to public repositories (자동 포함)
+        — 임베딩/reranker 가중치 다운로드
+    선택:
+      Read access to selected gated repositories
+        — Llama, Gemma 같이 라이선스 수락 후 접근하는 모델
+    안 줘도 되는 권한:
+      Write 권한 (우리 앱은 push/comment 안 함)
+
+  Inference Provider 활성화 (토큰과 별도):
+    https://huggingface.co/settings/inference-providers
+    Together AI / Fireworks / Cerebras / Hyperbolic 등 활성화 토글
+    무료 크레딧 있는 provider 많음
+
+  OpenAI API 키 (OPENAI_API_KEY):
+    발급: https://platform.openai.com/api-keys
+    Project key 추천 (특정 프로젝트 단위로 권한 격리 가능)
+
+  DashScope (DASHSCOPE_API_KEY, 선택):
+    Alibaba Cloud Model Studio — 결제 등록 필요. Qwen 공식 API 사용 시만.
+
+
 [3단계] Streamlit Cloud 배포
 
   1. https://share.streamlit.io 접속, GitHub 로그인
