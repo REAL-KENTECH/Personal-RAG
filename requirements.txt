@@ -8,3 +8,4 @@ pypdf
 rank_bm25
 ddgs
 requests
+supabase>=2.0

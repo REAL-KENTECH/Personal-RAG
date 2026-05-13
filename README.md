@@ -144,15 +144,29 @@ git add -A && git commit -m "..." && git push
 
 ## 영속 데이터 위치 (배포 시 주의)
 
-- `./.data/{embedder}/{doc_hash}/` — 임베딩 / 청크 / 페이지 이미지
-- `./.data/sessions/{id}.json` — 대화 세션 메타
-- `./logs/{session_id}.jsonl` — 사용자 + 어시스턴트 대화 기록 (한 줄 = 한 턴)
-- `./logs/agents.jsonl` — 에이전트 작업 실행 기록
+- `./.data/{user}/{embedder}/{doc_hash}/` — 임베딩 / 청크 / 페이지 이미지
+- `./.data/{user}/sessions/{id}.json` — 대화 세션 메타
+- `./logs/{user}/{session_id}.jsonl` — 사용자 + 어시스턴트 대화 기록 (한 줄 = 한 턴)
+- `./logs/{user}/agents.jsonl` — 에이전트 작업 실행 기록
+- `./logs/{user}/events.jsonl` — 로그인 / 문서 / 세션 / LLM 에러 이벤트
 
-**Streamlit Cloud의 파일시스템은 ephemeral 합니다** — 컨테이너 재시작 시 사라집니다. 영속이 필요하면:
-- DB 연동 (Postgres 등). `logs/*.jsonl` 스키마가 그대로 DB 테이블로 들어갑니다.
-- 외부 스토리지 (S3 등) 사용.
-- 로컬 호스팅 (직접 서버에 배포).
+**Streamlit Cloud 의 파일시스템은 ephemeral 합니다** — 모든 컨테이너 재시작(redeploy, reboot, idle hibernation) 시 위의 로컬 파일들은 통째로 사라집니다. 이 때문에 본 앱은 **Supabase Postgres 영속 로깅** 을 기본 지원합니다.
+
+## 영속 로깅 설정 (Supabase) — Cloud 배포 시 사실상 필수
+
+설정 안 하면 사용자 활동이 컨테이너 재시작과 함께 증발합니다. 5분이면 끝납니다.
+
+| 단계 | 작업 |
+|---|---|
+| 1 | https://supabase.com/dashboard 에서 가입 → **New project** (region 가까운 곳, free 500 MB 충분) |
+| 2 | **Project Settings → API** → "Project URL" 과 "anon public" 키 복사 |
+| 3 | **SQL Editor → New query** → 본 레포의 `db_schema.sql` 내용 붙여넣고 **Run** |
+| 4 | Streamlit Cloud 앱 **Settings → Secrets** 에 추가:<br>`SUPABASE_URL = "https://xxx.supabase.co"`<br>`SUPABASE_KEY = "eyJ..."` |
+| 5 | **Manage app → Reboot** |
+
+이후 자동으로 모든 채팅 턴 / 에이전트 실행 / 이벤트가 Supabase 의 `chat_turns`·`agent_runs`·`events` 테이블에 INSERT 됩니다. Supabase 대시보드의 **Table Editor** 또는 **SQL Editor** 에서 바로 조회/내보내기 가능.
+
+설정 안 하면 앱은 그대로 동작하되 로컬 JSONL 만 씁니다 (개발 / 단일 사용자 OK, Cloud 배포 비추).
 
 ## 보안 체크리스트
 

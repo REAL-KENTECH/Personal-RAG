@@ -159,6 +159,69 @@ def _user_logs_dir() -> Path:
 def _agent_log_path() -> Path:
     return _user_logs_dir() / 'agents.jsonl'
 
+
+def _events_log_path() -> Path:
+    return _user_logs_dir() / 'events.jsonl'
+
+
+# ---------- Persistent Supabase logging ----------
+# Streamlit Community Cloud's filesystem is ephemeral — every redeploy or
+# container restart wipes /mount/src/.../logs. To preserve user activity for
+# real analysis and audit, every log function ALSO inserts into Supabase
+# Postgres when SUPABASE_URL + SUPABASE_KEY are configured (via .env or
+# Streamlit secrets). If neither is set, only the local JSONL is written and
+# the function is a no-op. Tables expected (one-time setup via SQL editor):
+#   chat_turns, agent_runs, events  — schema in db_schema.sql.
+
+@st.cache_resource(show_spinner=False)
+def _supabase_client():
+    """Return a Supabase client if configured, else None. Cached so we don't
+    re-import / re-connect on every turn."""
+    url = os.getenv('SUPABASE_URL', '').strip()
+    key = os.getenv('SUPABASE_KEY', '').strip() or os.getenv('SUPABASE_SERVICE_KEY', '').strip()
+    if not url or not key:
+        return None
+    try:
+        from supabase import create_client
+        return create_client(url, key)
+    except Exception:
+        return None
+
+
+def _supabase_insert(table: str, record: dict) -> None:
+    """Best-effort INSERT. Never raises — local JSONL remains the source of
+    truth for the live container; Supabase is the durable copy."""
+    client = _supabase_client()
+    if client is None:
+        return
+    try:
+        client.table(table).insert(record).execute()
+    except Exception:
+        pass
+
+
+def _log_event(event_type: str, payload: dict = None) -> None:
+    """Append one event to ./logs/{user_id}/events.jsonl.
+
+    Captures everything outside the chat/agent JSONL: login, logout, document
+    ingest, document delete, session delete, LLM call failures. One line per
+    event so it merges cleanly with the other JSONL files for analytics.
+    Best-effort — failures swallowed so logging never breaks the user flow.
+    """
+    record = {
+        'kind': 'event',
+        'event_type': event_type,
+        'timestamp': datetime.datetime.now().isoformat(timespec='microseconds'),
+        'user_id': st.session_state.get('user_id', '_local'),
+        'payload': payload or {},
+    }
+    try:
+        with _events_log_path().open('a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
+    except Exception:
+        pass
+    _supabase_insert('events', record)
+
 EMBEDDER_CHOICES = [
     'BAAI/bge-m3',
     'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
@@ -422,8 +485,13 @@ def _render_login_screen():
                     and str(USERS_FROM_SECRETS[username]) == str(password)):
                 st.session_state['user_id'] = username
                 st.session_state['_loaded_for_embedder'] = None
+                _log_event('login', {'method': 'password', 'username': username})
                 st.rerun()
             else:
+                _log_event('login_failed', {
+                    'method': 'password',
+                    'attempted_username': (username or '')[:64],
+                })
                 st.error('사용자 ID 또는 비밀번호가 올바르지 않습니다.')
     st.stop()
 
@@ -455,8 +523,12 @@ def _auth_gate():
         # ends the session; previous anonymous data remains on disk under
         # its UUID until an admin cleans it up.
         st.session_state['user_id'] = '_anon_' + uuid.uuid4().hex[:10]
+        _log_event('login', {'method': 'anonymous'})
     else:
         st.session_state['user_id'] = '_local'
+        if not st.session_state.get('_local_login_logged'):
+            _log_event('login', {'method': 'local'})
+            st.session_state['_local_login_logged'] = True
 
 
 _auth_gate()
@@ -697,11 +769,13 @@ def list_sessions(limit: int = 30):
 
 def delete_session(sid: str):
     p = _session_path(sid)
-    if p.exists():
+    existed = p.exists()
+    if existed:
         try:
             p.unlink()
         except Exception:
             pass
+    _log_event('session_delete', {'session_id': sid, 'existed': existed})
 
 
 def start_new_session():
@@ -795,6 +869,7 @@ def log_turn_structured(user_input: str, response_text: str, reasoning: str,
         'session_title': st.session_state.get('current_session_title', ''),
         'turn_index': len(st.session_state['user_inputs']),
         'timestamp': datetime.datetime.now().isoformat(timespec='microseconds'),
+        'user_id': st.session_state.get('user_id', '_local'),
         'user_message': user_input,
         'assistant_message': response_text or '',
         'reasoning': reasoning or '',
@@ -815,6 +890,7 @@ def log_turn_structured(user_input: str, response_text: str, reasoning: str,
             f.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
     except Exception as e:
         st.warning(f'구조화 로그 저장 실패: {e}')
+    _supabase_insert('chat_turns', record)
 
 
 def auto_title_session() -> str:
@@ -1756,28 +1832,35 @@ def ingest_files(files):
     existing_ids = {d['id'] for d in st.session_state['docs']}
     existing_names = {d['name'] for d in st.session_state['docs']}
     new_count = 0
+    import time as _ing_time
+    batch_t0 = _ing_time.time()
 
     with st.status(f'{len(files)}개 파일 인덱싱 시작', expanded=True) as status:
         for f in files:
             if f.name in existing_names:
                 status.update(label=f'{f.name}: 이미 등록됨, 건너뜀')
+                _log_event('doc_skip', {'name': f.name, 'reason': 'duplicate_name'})
                 continue
 
+            file_t0 = _ing_time.time()
             status.update(label=f'{f.name}: 파싱 중...')
             parsed = parse_file(f)
             raw = parsed['raw_text']
             if not raw.strip():
                 st.warning(f'{f.name}: 추출된 텍스트가 없어 인덱스에서 제외합니다.')
+                _log_event('doc_skip', {'name': f.name, 'reason': 'no_text'})
                 continue
 
             status.update(label=f'{f.name}: 청크 분할 중...')
             chunks, chunk_pages = chunk_elements(parsed['elements'], size, overlap)
             if not chunks:
                 st.warning(f'{f.name}: 청크가 생성되지 않았습니다.')
+                _log_event('doc_skip', {'name': f.name, 'reason': 'no_chunks'})
                 continue
 
             did = compute_doc_id(f.name, raw, size, overlap)
             if did in existing_ids:
+                _log_event('doc_skip', {'name': f.name, 'reason': 'duplicate_content', 'doc_id': did})
                 continue
 
             cached = load_doc(eid, did)
@@ -1821,6 +1904,19 @@ def ingest_files(files):
             existing_names.add(doc['name'])
             new_count += 1
             status.update(label=f'{f.name}: 완료 ({len(doc["chunks"])} 청크)')
+            _log_event('doc_ingest', {
+                'name': doc['name'],
+                'doc_id': did,
+                'n_chunks': len(doc['chunks']),
+                'page_count': doc.get('page_count', 0),
+                'has_page_images': doc.get('has_page_images', False),
+                'is_pdf': doc.get('is_pdf', False),
+                'embedder': eid,
+                'chunk_size': size,
+                'chunk_overlap': overlap,
+                'elapsed_seconds': round(_ing_time.time() - file_t0, 3),
+                'from_cache': cached is not None,
+            })
 
         if new_count > 0:
             status.update(
@@ -1831,13 +1927,25 @@ def ingest_files(files):
             status.update(
                 label='새로 인덱싱된 문서 없음', state='complete', expanded=False,
             )
+    _log_event('doc_ingest_batch', {
+        'files_offered': len(files),
+        'new_count': new_count,
+        'elapsed_seconds': round(_ing_time.time() - batch_t0, 3),
+    })
     return new_count
 
 
 def remove_doc(doc_id: str):
     eid = st.session_state['embedder_model']
+    doc_name = next(
+        (d['name'] for d in st.session_state['docs'] if d['id'] == doc_id),
+        '',
+    )
     delete_saved_doc(eid, doc_id)
     st.session_state['docs'] = [d for d in st.session_state['docs'] if d['id'] != doc_id]
+    _log_event('doc_delete', {
+        'doc_id': doc_id, 'name': doc_name, 'embedder': eid,
+    })
 
 
 def reindex_all():
@@ -2206,6 +2314,19 @@ def _show_llm_error(e: Exception):
     err_str = str(e) or ''
     el = err_str.lower()
 
+    # Persist the error to events.jsonl so failures aren't only visible
+    # in the live UI. Best-effort — never raises.
+    try:
+        _log_event('llm_error', {
+            'provider': st.session_state.get('provider', ''),
+            'model': st.session_state.get('model', ''),
+            'base_url': st.session_state.get('base_url', ''),
+            'exception_type': type(e).__name__,
+            'error': err_str[:1500],
+        })
+    except Exception:
+        pass
+
     def show(headline, body_md):
         st.error(headline)
         st.markdown(body_md)
@@ -2549,6 +2670,7 @@ with st.sidebar:
     if USERS_FROM_SECRETS:
         st.caption(f"로그인: `{uid}`")
         if st.button('로그아웃', use_container_width=True, key='logout_btn'):
+            _log_event('logout', {'username': uid})
             base_clear = (
                 'user_id', 'user_inputs', 'generated_responses',
                 'thinking_traces', 'retrieved_per_turn',
@@ -3182,30 +3304,56 @@ def view_cache():
         '파일로 저장됩니다 (한 줄당 한 턴, 분석·DB 적재 친화적).',
     )
 
-    # Agent runs log (separate file)
-    agent_log = _agent_log_path()
-    if agent_log.exists():
+    # ----- Persistent logging status (Supabase) -----
+    if _supabase_client() is not None:
+        st.success(
+            '영속 로깅: Supabase Postgres 에 동시 기록 중 — '
+            '컨테이너가 재시작되어도 모든 채팅 / 에이전트 / 이벤트가 보존됩니다.'
+        )
+    else:
+        if _is_streamlit_cloud():
+            st.warning(
+                '영속 로깅 미설정 — 아래 로컬 JSONL 파일은 컨테이너 재시작 시 사라집니다. '
+                '영구 보존하려면 Settings → Secrets 에 `SUPABASE_URL` 과 `SUPABASE_KEY` 를 추가하세요 '
+                '(README 의 "영속 로깅 설정" 섹션 참고, 5분 소요).'
+            )
+        else:
+            st.info(
+                '영속 로깅 미설정 — 로컬 개발 중에는 JSONL 만으로도 충분합니다. '
+                'Cloud 에 배포 시에는 `SUPABASE_URL` / `SUPABASE_KEY` 설정 권장.'
+            )
+
+    # Agent runs + events logs (separate aggregate files)
+    for fname, label_text in (
+        ('agents.jsonl', '에이전트 실행 기록'),
+        ('events.jsonl', '로그인 · 문서 · 세션 · LLM 에러 이벤트'),
+    ):
+        fpath = user_logs / fname
+        if not fpath.exists():
+            continue
         try:
-            n_lines = sum(1 for _ in agent_log.open('r', encoding='utf-8'))
+            n_lines = sum(1 for _ in fpath.open('r', encoding='utf-8'))
         except Exception:
             n_lines = '?'
-        size_kb = agent_log.stat().st_size / 1024
+        size_kb = fpath.stat().st_size / 1024
+        unit = 'runs' if fname == 'agents.jsonl' else 'events'
         with st.container(border=True):
             cols = st.columns([5, 1, 1])
-            cols[0].markdown(f"**`agents.jsonl`** · 에이전트 실행 기록")
-            cols[1].caption(f'{n_lines} runs · {size_kb:.1f} KB')
+            cols[0].markdown(f"**`{fname}`** · {label_text}")
+            cols[1].caption(f'{n_lines} {unit} · {size_kb:.1f} KB')
             with cols[2]:
                 try:
                     st.download_button(
-                        '다운로드', data=agent_log.read_bytes(),
-                        file_name='agents.jsonl', mime='application/x-jsonlines',
-                        key='dl_agents_jsonl', use_container_width=True,
+                        '다운로드', data=fpath.read_bytes(),
+                        file_name=fname, mime='application/x-jsonlines',
+                        key=f'dl_{fname}', use_container_width=True,
                     )
                 except Exception:
                     pass
 
+    _AGGREGATE_LOGS = {'agents.jsonl', 'events.jsonl'}
     jsonl_files = sorted(
-        [p for p in user_logs.glob('*.jsonl') if p.name != 'agents.jsonl'],
+        [p for p in user_logs.glob('*.jsonl') if p.name not in _AGGREGATE_LOGS],
         key=lambda p: p.stat().st_mtime, reverse=True,
     )
     if not jsonl_files:
@@ -3347,6 +3495,7 @@ def _agent_log(task_key: str, inputs: dict, output: str, retrieved: list,
         'kind': 'agent',
         'task': task_key,
         'timestamp': datetime.datetime.now().isoformat(timespec='microseconds'),
+        'user_id': st.session_state.get('user_id', '_local'),
         'inputs': inputs,
         'output': output or '',
         'model': model,
@@ -3360,6 +3509,7 @@ def _agent_log(task_key: str, inputs: dict, output: str, retrieved: list,
             f.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
     except Exception as e:
         st.warning(f'에이전트 로그 저장 실패: {e}')
+    _supabase_insert('agent_runs', record)
 
 
 # ---- Task templates ----
@@ -3757,10 +3907,11 @@ def view_about():
         - 같은 파일·청크 설정으로 다시 업로드 시 캐시에서 즉시 복원.
         - 사용자별 환경설정 (API 키, 모델, 검색 설정 등) 영속 저장: `./.data/{user}/preferences.json`. Streamlit Cloud의 idle 재연결 시 메모리가 초기화되더라도 다음 접속에서 자동 복원됩니다. (Cloud 컨테이너가 재시작되면 사라지므로 영구 보존이 필요하면 Streamlit Secrets 사용 권장.)
         - 대화 세션 메타: `./.data/{user}/sessions/{id}.json` (사이드바 대화 목록의 원천).
-        - **에이전트 실행 로그**: `./logs/agents.jsonl` — 에이전트 워크플로(이메일/보고서/요약/분석/비교)의 실행 기록. task, inputs, output, retrieved, model, elapsed_seconds 포함.
-        - **대화 로그**: `./logs/{session_id}.jsonl` — 세션별로 한 파일, 한 줄당 한 턴. 분석·DB 친화적 구조.
+        - **대화 로그**: `./logs/{user}/{session_id}.jsonl` — 세션별로 한 파일, 한 줄당 한 턴. 분석·DB 친화적 구조.
           필드: session_id, turn_index, timestamp, user_message, assistant_message, reasoning, model/provider, elapsed_seconds, retrieved (rank·source·score·page·url), citation_numbers_used, query_variants, settings_snapshot (rerank/HyDE/multi-query/per-doc 등 모든 설정 스냅샷).
-          pandas: `pd.concat([pd.read_json(f, lines=True) for f in glob.glob('logs/*.jsonl')])`.
+        - **에이전트 실행 로그**: `./logs/{user}/agents.jsonl` — 에이전트 워크플로(이메일/보고서/요약/분석/비교)의 실행 기록. task, inputs, output, retrieved, model, elapsed_seconds.
+        - **이벤트 로그**: `./logs/{user}/events.jsonl` — 로그인/로그아웃, 문서 업로드·삭제, 세션 삭제, LLM 호출 실패 등 비-턴 이벤트. 각 줄에 event_type, timestamp, user_id, payload.
+          pandas: `pd.concat([pd.read_json(f, lines=True) for f in glob.glob('logs/*/*.jsonl')])`.
           Postgres: `\\copy turns FROM '...' WITH (FORMAT json)` 또는 batched insert.
 
         #### 지원 LLM 엔드포인트
