@@ -4514,69 +4514,56 @@ def view_settings():
                  'vLLM 등 셀프 호스팅 / Custom OpenAI-호환 endpoint.'),
             ]
 
-            kc1, kc2 = st.columns(2)
-            for i, (active_key, label_text, owner, ph, help_text) in enumerate(_key_specs):
-                col = kc1 if i % 2 == 0 else kc2
+            def _render_key_row(active_key, label_text, owner, ph, help_text):
                 pending_key = f'_pending_{active_key}'
-                # First-time render: seed widget value from active key so
-                # the field shows existing key. Streamlit retains pending
-                # value across reruns via key=.
+                # First-time render seeds the widget from the active value.
+                # On subsequent reruns Streamlit retains the user's typing
+                # via the widget key, so we don't re-seed.
                 if pending_key not in st.session_state:
-                    st.session_state[pending_key] = st.session_state.get(active_key, '')
-                with col:
-                    st.text_input(
-                        _key_label(label_text, owner),
-                        type='password',
-                        placeholder=ph,
-                        help=help_text,
-                        key=pending_key,
+                    st.session_state[pending_key] = (
+                        st.session_state.get(active_key, '') or ''
                     )
-
-            # Apply / reset row — only show when any pending differs from active.
-            pending_changes = [
-                (active_key, label_text)
-                for active_key, label_text, *_ in _key_specs
-                if st.session_state.get(f'_pending_{active_key}', '') !=
-                   (st.session_state.get(active_key, '') or '')
-            ]
-            if pending_changes:
-                names = ', '.join(lt for _, lt in pending_changes)
-                a1, a2, a3 = st.columns([3, 1, 1])
-                with a1:
-                    st.caption(
-                        f'변경 대기: {names}. 저장을 눌러야 모델 호출에 반영됩니다.'
-                    )
-                with a2:
-                    if st.button(
-                        '취소', key='api_keys_reset',
+                st.text_input(
+                    _key_label(label_text, owner),
+                    type='password',
+                    placeholder=ph,
+                    help=help_text,
+                    key=pending_key,
+                )
+                pending_val = st.session_state.get(pending_key, '') or ''
+                active_val = st.session_state.get(active_key, '') or ''
+                if pending_val != active_val:
+                    bcols = st.columns([2, 1, 1])
+                    bcols[0].caption('변경 대기 — 적용을 눌러야 호출에 반영됩니다.')
+                    if bcols[1].button(
+                        '취소', key=f'reset_{active_key}',
                         use_container_width=True,
                     ):
-                        for active_key, *_ in _key_specs:
-                            st.session_state[f'_pending_{active_key}'] = (
-                                st.session_state.get(active_key, '')
-                            )
+                        st.session_state[pending_key] = active_val
                         st.rerun()
-                with a3:
-                    if st.button(
-                        '저장', key='api_keys_apply',
+                    if bcols[2].button(
+                        '적용', key=f'apply_{active_key}',
                         type='primary', use_container_width=True,
                     ):
-                        for active_key, *_ in _key_specs:
-                            st.session_state[active_key] = (
-                                st.session_state.get(f'_pending_{active_key}', '')
-                            )
+                        st.session_state[active_key] = pending_val
                         try:
                             _save_user_prefs()
                         except Exception:
                             pass
                         st.rerun()
-            else:
-                # 모든 키가 active 와 일치 → 변경 사항 없음
-                set_count = sum(
-                    1 for active_key, *_ in _key_specs
-                    if (st.session_state.get(active_key, '') or '').strip()
-                )
-                st.caption(f'현재 {set_count}/{len(_key_specs)} 개의 키가 저장돼 있습니다.')
+
+            kc1, kc2 = st.columns(2)
+            for i, spec in enumerate(_key_specs):
+                col = kc1 if i % 2 == 0 else kc2
+                with col:
+                    _render_key_row(*spec)
+
+            # Saved-count summary at the bottom.
+            set_count = sum(
+                1 for active_key, *_ in _key_specs
+                if (st.session_state.get(active_key, '') or '').strip()
+            )
+            st.caption(f'현재 {set_count}/{len(_key_specs)} 개의 키가 저장돼 있습니다.')
 
     # ============== RAG 검색 ==============
     with tab_search:
