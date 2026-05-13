@@ -188,6 +188,29 @@ def _supabase_client():
         return None
 
 
+def _scrub_for_postgres(obj):
+    """Recursively strip control characters Postgres can't store.
+
+    PDF text extraction routinely embeds NULL bytes (\\x00) into chunk text.
+    Postgres rejects them in TEXT and JSONB columns with code 22P05. We
+    also drop other ASCII control chars (except tab/newline/cr) since they
+    contribute nothing for log analysis and trip JSON validators in some
+    Postgres setups."""
+    if isinstance(obj, str):
+        if '\x00' not in obj and not any(
+            ord(c) < 32 and c not in '\t\n\r' for c in obj[:1024]
+        ):
+            return obj  # fast path — clean string
+        return ''.join(
+            c for c in obj if ord(c) >= 32 or c in '\t\n\r'
+        ).replace('\x00', '')
+    if isinstance(obj, dict):
+        return {k: _scrub_for_postgres(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_scrub_for_postgres(x) for x in obj]
+    return obj
+
+
 def _supabase_insert(table: str, record: dict) -> None:
     """Best-effort INSERT. Never raises — local JSONL remains the source of
     truth for the live container; Supabase is the durable copy. Failures are
@@ -198,7 +221,7 @@ def _supabase_insert(table: str, record: dict) -> None:
         return
     st.session_state['_sb_attempts'] = st.session_state.get('_sb_attempts', 0) + 1
     try:
-        client.table(table).insert(record).execute()
+        client.table(table).insert(_scrub_for_postgres(record)).execute()
         st.session_state['_sb_successes'] = st.session_state.get('_sb_successes', 0) + 1
     except Exception as e:
         st.session_state['_sb_failures'] = st.session_state.get('_sb_failures', 0) + 1
