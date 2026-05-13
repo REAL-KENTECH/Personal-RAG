@@ -457,6 +457,75 @@ def _auth_gate():
 _auth_gate()
 
 
+# ---------- Persisted per-user preferences (survives idle reset) ----------
+# Streamlit Cloud disconnects idle WebSocket sessions, and reconnection
+# resets st.session_state. We persist the slowly-changing config (API keys,
+# provider, model, retrieval/sampling settings, active view) to disk so the
+# user does not lose them when they come back after stepping away. Conversation
+# history is already persisted via the session JSONL files.
+
+_PERSIST_KEYS = (
+    'provider', 'model', 'base_url',
+    'hf_api_key', 'openai_api_key', 'dashscope_api_key', 'custom_api_key',
+    'tavily_key', 'brave_key',
+    'embedder_model', 'chunk_size', 'chunk_overlap',
+    'retrieval_mode', 'retrieve_top_n', 'final_top_k', 'use_reranker',
+    'use_contextual_rewrite', 'use_multi_query', 'use_hyde', 'n_paraphrases',
+    'per_doc_balance', 'per_doc_reserve', 'comparison_autodetect',
+    'include_page_images', 'max_page_images',
+    'web_enabled', 'web_provider', 'web_top_n',
+    'max_tokens', 'temperature', 'top_p', 'sampling_top_k',
+    'presence_penalty', 'stream', 'enable_thinking',
+    'chat_doc_filter', 'active_view',
+)
+
+
+def _user_prefs_path() -> Path:
+    return _user_data_dir() / 'preferences.json'
+
+
+def _load_user_prefs():
+    """Override session_state defaults with whatever was last saved for this
+    user. Env / secrets values stay in session_state until disk overrides them,
+    so a non-empty disk value wins (user explicitly entered it)."""
+    p = _user_prefs_path()
+    if not p.exists():
+        return
+    try:
+        data = json.loads(p.read_text())
+    except Exception:
+        return
+    for k in _PERSIST_KEYS:
+        if k not in data:
+            continue
+        v = data[k]
+        if v is None:
+            continue
+        if isinstance(v, str) and not v:
+            # Don't clobber an env-loaded key with an empty saved string.
+            continue
+        st.session_state[k] = v
+
+
+def _save_user_prefs():
+    """Write current configurable session_state to disk if anything changed."""
+    data = {k: st.session_state.get(k) for k in _PERSIST_KEYS}
+    try:
+        encoded = json.dumps(data, ensure_ascii=False, default=str, sort_keys=True)
+    except Exception:
+        return
+    if st.session_state.get('_prefs_snapshot') == encoded:
+        return
+    try:
+        _user_prefs_path().write_text(encoded)
+        st.session_state['_prefs_snapshot'] = encoded
+    except Exception:
+        pass
+
+
+_load_user_prefs()
+
+
 # =============================================================================
 # Persistent vector store
 # =============================================================================
@@ -2398,14 +2467,17 @@ with st.sidebar:
     if USERS_FROM_SECRETS:
         st.caption(f"로그인: `{uid}`")
         if st.button('로그아웃', use_container_width=True, key='logout_btn'):
-            for k in (
+            base_clear = (
                 'user_id', 'user_inputs', 'generated_responses',
                 'thinking_traces', 'retrieved_per_turn',
                 'query_variants_per_turn', 'current_session_id',
                 'current_session_title', 'current_session_created_at',
                 'docs', 'doc_embs', 'doc_meta',
-                '_loaded_for_embedder', 'chat_doc_filter',
-            ):
+                '_loaded_for_embedder', '_prefs_snapshot',
+            )
+            # Also clear all persistable preference keys so the next user does
+            # not inherit the previous one's API keys / model / settings.
+            for k in base_clear + _PERSIST_KEYS:
                 if k in st.session_state:
                     del st.session_state[k]
             st.rerun()
@@ -3590,7 +3662,8 @@ def view_about():
         - `./.data/{embedder}/{doc_hash}/` — 임베더별 격리.
         - `meta.json` (청크, 페이지 메타, 원본 텍스트) + `embeddings.npy` + `pages/{page}.png`.
         - 같은 파일·청크 설정으로 다시 업로드 시 캐시에서 즉시 복원.
-        - 대화 세션 메타: `./.data/sessions/{id}.json` (사이드바 대화 목록의 원천).
+        - 사용자별 환경설정 (API 키, 모델, 검색 설정 등) 영속 저장: `./.data/{user}/preferences.json`. Streamlit Cloud의 idle 재연결 시 메모리가 초기화되더라도 다음 접속에서 자동 복원됩니다. (Cloud 컨테이너가 재시작되면 사라지므로 영구 보존이 필요하면 Streamlit Secrets 사용 권장.)
+        - 대화 세션 메타: `./.data/{user}/sessions/{id}.json` (사이드바 대화 목록의 원천).
         - **에이전트 실행 로그**: `./logs/agents.jsonl` — 에이전트 워크플로(이메일/보고서/요약/분석/비교)의 실행 기록. task, inputs, output, retrieved, model, elapsed_seconds 포함.
         - **대화 로그**: `./logs/{session_id}.jsonl` — 세션별로 한 파일, 한 줄당 한 턴. 분석·DB 친화적 구조.
           필드: session_id, turn_index, timestamp, user_message, assistant_message, reasoning, model/provider, elapsed_seconds, retrieved (rank·source·score·page·url), citation_numbers_used, query_variants, settings_snapshot (rerank/HyDE/multi-query/per-doc 등 모든 설정 스냅샷).
@@ -3619,3 +3692,6 @@ _VIEWS = {
     'about':    view_about,
 }
 _VIEWS.get(st.session_state.get('active_view', 'chat'), view_chat)()
+
+# Persist user preferences after every rerun (cheap; only writes on change).
+_save_user_prefs()
