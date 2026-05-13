@@ -667,9 +667,13 @@ def _render_login_screen():
             tab_login, tab_signup = st.tabs(['로그인', '회원가입'])
             with tab_login:
                 with st.form('_login_form', clear_on_submit=False):
-                    username = st.text_input('아이디', key='login_username')
+                    username = st.text_input(
+                        '아이디', key='login_username',
+                        placeholder='가입한 아이디',
+                    )
                     password = st.text_input(
                         '비밀번호', type='password', key='login_password',
+                        placeholder='비밀번호 입력',
                     )
                     submitted = st.form_submit_button(
                         '로그인', use_container_width=True, type='primary',
@@ -694,15 +698,19 @@ def _render_login_screen():
             with tab_signup:
                 with st.form('_signup_form', clear_on_submit=False):
                     new_username = st.text_input(
-                        '새 아이디 (2-64자)', key='signup_username',
+                        '새 아이디',
+                        key='signup_username',
+                        placeholder='2자 이상 64자 이하',
                     )
                     new_password = st.text_input(
-                        '새 비밀번호 (6자 이상)', type='password',
+                        '새 비밀번호', type='password',
                         key='signup_password',
+                        placeholder='6자 이상 입력',
                     )
                     new_password2 = st.text_input(
                         '비밀번호 확인', type='password',
                         key='signup_password2',
+                        placeholder='위와 동일하게 한 번 더',
                     )
                     signup_submitted = st.form_submit_button(
                         '회원가입', use_container_width=True, type='primary',
