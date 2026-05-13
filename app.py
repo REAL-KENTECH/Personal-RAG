@@ -291,9 +291,11 @@ PROVIDER_NAMES = list(PROVIDERS.keys())
 _CUSTOM = '__custom__'
 PROVIDER_MODELS = {
     'Hugging Face Router': [
-        # Korean-native — strongest 한국어 이해/생성
-        'LGAI-EXAONE/EXAONE-4.5-33B',
-        'naver-hyperclovax/HyperCLOVAX-SEED-Think-32B',
+        # NOTE: Korean-native models from LG (EXAONE) and Naver (HyperCLOVAX)
+        # exist on HF Hub but Inference Providers (Together/Cerebras/Hyperbolic)
+        # don't typically deploy them. Calling them through the Router returns
+        # "model_not_supported". Self-host via vLLM or Ollama instead — see the
+        # 'vLLM / local' provider preset below for suggested model IDs.
         # DeepSeek — flagship general purpose
         'deepseek-ai/DeepSeek-V4-Pro',
         'deepseek-ai/DeepSeek-V4-Flash',
@@ -363,7 +365,18 @@ PROVIDER_MODELS = {
         'qwen-turbo',
         'qwen-vl-max',
     ],
-    'vLLM / local': [],
+    'vLLM / local': [
+        # Korean-native suggestions — install via `vllm serve <model_id>` or
+        # Ollama. These are the highest-quality 한국어 LLMs as of 2026 but
+        # are not routed through HF Inference Providers.
+        'LGAI-EXAONE/EXAONE-4.5-33B',
+        'LGAI-EXAONE/EXAONE-3.5-32B-Instruct',
+        'naver-hyperclovax/HyperCLOVAX-SEED-Think-32B',
+        'naver-hyperclovax/HyperCLOVAX-SEED-Text-Instruct-1.5B',
+        # Strong open multilingual that handle Korean well
+        'Qwen/Qwen3-Next-80B-A3B-Instruct',
+        'meta-llama/Llama-3.3-70B-Instruct',
+    ],
     'Custom': [],
 }
 
@@ -647,6 +660,16 @@ def _load_user_prefs():
     if (st.session_state.get('provider') == 'OpenAI'
             and st.session_state.get('model') in _RESPONSES_ONLY):
         st.session_state['model'] = PROVIDERS['OpenAI']['default_model']
+    # Same idea for Korean-native models that used to be in the HF Router
+    # dropdown but aren't served by any Inference Provider. Auto-swap to
+    # a multilingual model that does work on HF Router.
+    _HF_ROUTER_NOT_SERVED = {
+        'LGAI-EXAONE/EXAONE-4.5-33B',
+        'naver-hyperclovax/HyperCLOVAX-SEED-Think-32B',
+    }
+    if (st.session_state.get('provider') == 'Hugging Face Router'
+            and st.session_state.get('model') in _HF_ROUTER_NOT_SERVED):
+        st.session_state['model'] = 'Qwen/Qwen3-Next-80B-A3B-Instruct'
     st.session_state['_prefs_loaded'] = True
 
 
@@ -3061,16 +3084,40 @@ def _show_llm_error(e: Exception):
 
     # Provider 미지원 / 모델 deploy 안 됨
     if 'not supported by any provider' in el or 'model_not_supported' in el:
-        show(
-            '이 모델을 서빙하는 활성 Provider가 없습니다.',
-            """
+        # 한국 기업 모델 (EXAONE / HyperCLOVAX) 은 거의 항상 이 경로.
+        is_korean_native = any(
+            k in err_str
+            for k in ('LGAI-EXAONE', 'EXAONE', 'hyperclovax', 'HyperCLOVA')
+        )
+        if is_korean_native:
+            show(
+                '한국어 모델 (EXAONE / HyperCLOVAX) 은 HF Inference Providers 에 deploy 되어 있지 않습니다.',
+                """
+**해결 방법 — 둘 중 선택:**
+
+**(권장) 자가호스팅** — vLLM 또는 Ollama 로 직접 서빙
+1. 본인 서버/GPU 에서 `vllm serve LGAI-EXAONE/EXAONE-4.5-33B` 실행
+2. 설정 → 공급자 `vLLM / local`, base_url 본인 endpoint (예: `http://localhost:8000/v1`)
+3. 33B 모델은 GPU 약 70GB VRAM 필요 (A100 80GB 또는 H100). 작은 변형 (EXAONE-3.5-7.8B 등) 은 24GB 로도 가능.
+
+**HF Inference Providers 로 동작하는 한국어 강한 대안:**
+- `Qwen/Qwen3-Next-80B-A3B-Instruct` — 다국어, 한국어 우수
+- `Qwen/Qwen3-235B-A22B-Instruct-2507` — 더 큰 변형
+- `meta-llama/Llama-3.3-70B-Instruct` — 한국어 양호
+- `deepseek-ai/DeepSeek-V4-Pro` — 강력한 다국어
+                """,
+            )
+        else:
+            show(
+                '이 모델을 서빙하는 활성 Provider가 없습니다.',
+                """
 **해결 방법:**
 
 1. 모델 카드 우측 "Inference Providers" 박스에서 서빙 가능한 provider 확인
 2. https://huggingface.co/settings/inference-providers 에서 해당 provider 활성화 (Together AI / Cerebras / Hyperbolic 등)
 3. 또는 설정 탭에서 다른 모델로 변경
-            """,
-        )
+                """,
+            )
         return
 
     # OpenAI — Responses API 전용 모델 (gpt-5-pro, o1-pro 등) → Chat Completions 거부
