@@ -366,16 +366,12 @@ PROVIDER_MODELS = {
         'qwen-vl-max',
     ],
     'vLLM / local': [
-        # Korean-native suggestions — install via `vllm serve <model_id>` or
-        # Ollama. These are the highest-quality 한국어 LLMs as of 2026 but
-        # are not routed through HF Inference Providers.
-        'LGAI-EXAONE/EXAONE-4.5-33B',
-        'LGAI-EXAONE/EXAONE-3.5-32B-Instruct',
-        'naver-hyperclovax/HyperCLOVAX-SEED-Think-32B',
-        'naver-hyperclovax/HyperCLOVAX-SEED-Text-Instruct-1.5B',
-        # Strong open multilingual that handle Korean well
+        # Self-hosted suggestions (you bring the GPU + run `vllm serve <id>`).
+        # Strong open multilingual that handle Korean well:
         'Qwen/Qwen3-Next-80B-A3B-Instruct',
+        'Qwen/Qwen2.5-7B-Instruct',
         'meta-llama/Llama-3.3-70B-Instruct',
+        'meta-llama/Llama-3.1-8B-Instruct',
     ],
     'Custom': [],
 }
@@ -653,23 +649,27 @@ def _load_user_prefs():
             # Don't clobber an env-loaded key with an empty saved string.
             continue
         st.session_state[k] = v
-    # Fallback: if a stale saved model is one of OpenAI's Responses-API-only
-    # models (e.g. user previously picked gpt-5-pro), it would 404 on every
-    # turn. Auto-swap to the provider's default so the UX recovers silently.
-    _RESPONSES_ONLY = {'gpt-5-pro', 'o1-pro', 'gpt-5.5-pro', 'gpt-5.4-pro'}
-    if (st.session_state.get('provider') == 'OpenAI'
-            and st.session_state.get('model') in _RESPONSES_ONLY):
-        st.session_state['model'] = PROVIDERS['OpenAI']['default_model']
-    # Same idea for Korean-native models that used to be in the HF Router
-    # dropdown but aren't served by any Inference Provider. Auto-swap to
-    # a multilingual model that does work on HF Router.
-    _HF_ROUTER_NOT_SERVED = {
+    # Fallback: deprecated models (Responses-only / Korean-native not on
+    # HF Inference Providers) should be swapped before any API call. We
+    # only have the swap table after PROVIDERS is defined further down the
+    # file, so just check by name here — the table itself is referenced at
+    # call time by _resolve_deprecated_model(). This pass handles "user's
+    # picker still shows the bad name" on session start.
+    _DEPRECATED_NOW = {
+        'gpt-5-pro', 'o1-pro', 'gpt-5.5-pro', 'gpt-5.4-pro',
         'LGAI-EXAONE/EXAONE-4.5-33B',
         'naver-hyperclovax/HyperCLOVAX-SEED-Think-32B',
     }
-    if (st.session_state.get('provider') == 'Hugging Face Router'
-            and st.session_state.get('model') in _HF_ROUTER_NOT_SERVED):
-        st.session_state['model'] = 'Qwen/Qwen3-Next-80B-A3B-Instruct'
+    if st.session_state.get('model') in _DEPRECATED_NOW:
+        # If we know the provider, swap to its default; otherwise leave a
+        # neutral safe choice. The call-time guard handles the rest.
+        prov = st.session_state.get('provider', '')
+        if prov == 'OpenAI':
+            st.session_state['model'] = 'gpt-5-mini'
+        elif prov == 'Hugging Face Router':
+            st.session_state['model'] = 'Qwen/Qwen3-Next-80B-A3B-Instruct'
+        else:
+            st.session_state['model'] = 'Qwen/Qwen3-Next-80B-A3B-Instruct'
     st.session_state['_prefs_loaded'] = True
 
 
@@ -1875,6 +1875,41 @@ def _uses_max_completion_tokens(model: str) -> bool:
     return _is_openai_reasoning_model(model) or _is_openai_gpt5_family(model)
 
 
+# Models we used to expose but pulled because they can't be called through
+# their configured endpoint. The runtime guard below swaps them on the fly
+# before the API request goes out — protects users whose saved prefs / chat
+# state still reference them after we removed them from the dropdown.
+_DEPRECATED_MODEL_SWAPS = {
+    # Korean-native models: HF Inference Providers don't deploy them.
+    'LGAI-EXAONE/EXAONE-4.5-33B': ('Qwen/Qwen3-Next-80B-A3B-Instruct', 'Hugging Face Router'),
+    'naver-hyperclovax/HyperCLOVAX-SEED-Think-32B': ('Qwen/Qwen3-Next-80B-A3B-Instruct', 'Hugging Face Router'),
+    # OpenAI Responses-API-only models.
+    'gpt-5-pro':     ('gpt-5-mini', 'OpenAI'),
+    'gpt-5.5-pro':   ('gpt-5-mini', 'OpenAI'),
+    'gpt-5.4-pro':   ('gpt-5-mini', 'OpenAI'),
+    'o1-pro':        ('o4-mini',     'OpenAI'),
+}
+
+
+def _resolve_deprecated_model(model: str) -> str:
+    """Swap a deprecated model id for its replacement at API-call time.
+    Also updates st.session_state so the picker UI reflects the swap. Shows
+    a one-time-per-session notice so the user knows it happened."""
+    if model not in _DEPRECATED_MODEL_SWAPS:
+        return model
+    replacement, _expected_provider = _DEPRECATED_MODEL_SWAPS[model]
+    notified = st.session_state.setdefault('_deprecated_model_notified', set())
+    if model not in notified:
+        st.info(
+            f'`{model}` 은 이 endpoint 에서 서빙되지 않아 '
+            f'`{replacement}` 으로 자동 전환했습니다. '
+            f'설정 탭에서 다른 모델로 변경할 수도 있습니다.'
+        )
+        notified.add(model)
+    st.session_state['model'] = replacement
+    return replacement
+
+
 def _build_completion_params(
     model: str, messages: list,
     *,
@@ -1883,6 +1918,7 @@ def _build_completion_params(
 ) -> dict:
     """Build chat.completions.create kwargs that respect per-model constraints.
     Drops sampling params for GPT-5/o-series; uses max_completion_tokens for those."""
+    model = _resolve_deprecated_model(model)
     out = {'model': model, 'messages': messages}
     if stream:
         out['stream'] = True
@@ -3084,40 +3120,15 @@ def _show_llm_error(e: Exception):
 
     # Provider 미지원 / 모델 deploy 안 됨
     if 'not supported by any provider' in el or 'model_not_supported' in el:
-        # 한국 기업 모델 (EXAONE / HyperCLOVAX) 은 거의 항상 이 경로.
-        is_korean_native = any(
-            k in err_str
-            for k in ('LGAI-EXAONE', 'EXAONE', 'hyperclovax', 'HyperCLOVA')
-        )
-        if is_korean_native:
-            show(
-                '한국어 모델 (EXAONE / HyperCLOVAX) 은 HF Inference Providers 에 deploy 되어 있지 않습니다.',
-                """
-**해결 방법 — 둘 중 선택:**
-
-**(권장) 자가호스팅** — vLLM 또는 Ollama 로 직접 서빙
-1. 본인 서버/GPU 에서 `vllm serve LGAI-EXAONE/EXAONE-4.5-33B` 실행
-2. 설정 → 공급자 `vLLM / local`, base_url 본인 endpoint (예: `http://localhost:8000/v1`)
-3. 33B 모델은 GPU 약 70GB VRAM 필요 (A100 80GB 또는 H100). 작은 변형 (EXAONE-3.5-7.8B 등) 은 24GB 로도 가능.
-
-**HF Inference Providers 로 동작하는 한국어 강한 대안:**
-- `Qwen/Qwen3-Next-80B-A3B-Instruct` — 다국어, 한국어 우수
-- `Qwen/Qwen3-235B-A22B-Instruct-2507` — 더 큰 변형
-- `meta-llama/Llama-3.3-70B-Instruct` — 한국어 양호
-- `deepseek-ai/DeepSeek-V4-Pro` — 강력한 다국어
-                """,
-            )
-        else:
-            show(
-                '이 모델을 서빙하는 활성 Provider가 없습니다.',
-                """
+        show(
+            '이 모델을 서빙하는 활성 Provider가 없습니다.',
+            """
 **해결 방법:**
 
-1. 모델 카드 우측 "Inference Providers" 박스에서 서빙 가능한 provider 확인
-2. https://huggingface.co/settings/inference-providers 에서 해당 provider 활성화 (Together AI / Cerebras / Hyperbolic 등)
-3. 또는 설정 탭에서 다른 모델로 변경
-                """,
-            )
+1. 설정 탭에서 다른 모델로 변경 (한국어가 강한 추천: `Qwen/Qwen3-Next-80B-A3B-Instruct`, `meta-llama/Llama-3.3-70B-Instruct`, `deepseek-ai/DeepSeek-V4-Pro`)
+2. 또는 모델 카드 우측 "Inference Providers" 박스에서 서빙 가능한 provider 확인 후 https://huggingface.co/settings/inference-providers 에서 활성화 (Together AI / Cerebras / Hyperbolic 등)
+            """,
+        )
         return
 
     # OpenAI — Responses API 전용 모델 (gpt-5-pro, o1-pro 등) → Chat Completions 거부
