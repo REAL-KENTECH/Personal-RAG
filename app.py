@@ -296,18 +296,18 @@ PROVIDER_MODELS = {
         'CohereLabs/c4ai-command-a-03-2025',
     ],
     'OpenAI': [
-        # GPT-5 latest tier
+        # GPT-5 tier — Chat Completions compatible only.
+        # NOTE: *-pro variants (gpt-5-pro, gpt-5.5-pro, gpt-5.4-pro, o1-pro)
+        # are OpenAI's Responses-API-only models and would 404 here, so they
+        # are intentionally omitted. Use gpt-5 or o3 for top-tier reasoning.
         'gpt-5.5',
-        'gpt-5.5-pro',
         'gpt-5.4',
-        'gpt-5.4-pro',
         'gpt-5.4-mini',
         'gpt-5.4-nano',
         'gpt-5.3-chat-latest',
         'gpt-5.2',
         'gpt-5.1',
         'gpt-5',
-        'gpt-5-pro',
         'gpt-5-mini',
         'gpt-5-nano',
         'gpt-5-chat-latest',
@@ -323,7 +323,6 @@ PROVIDER_MODELS = {
         'o3',
         'o3-mini',
         'o1',
-        'o1-pro',
     ],
     'DashScope (Qwen)': [
         'qwen3.6-27b',
@@ -598,6 +597,13 @@ def _load_user_prefs():
             # Don't clobber an env-loaded key with an empty saved string.
             continue
         st.session_state[k] = v
+    # Fallback: if a stale saved model is one of OpenAI's Responses-API-only
+    # models (e.g. user previously picked gpt-5-pro), it would 404 on every
+    # turn. Auto-swap to the provider's default so the UX recovers silently.
+    _RESPONSES_ONLY = {'gpt-5-pro', 'o1-pro', 'gpt-5.5-pro', 'gpt-5.4-pro'}
+    if (st.session_state.get('provider') == 'OpenAI'
+            and st.session_state.get('model') in _RESPONSES_ONLY):
+        st.session_state['model'] = PROVIDERS['OpenAI']['default_model']
     st.session_state['_prefs_loaded'] = True
 
 
@@ -2381,6 +2387,24 @@ def _show_llm_error(e: Exception):
 1. 모델 카드 우측 "Inference Providers" 박스에서 서빙 가능한 provider 확인
 2. https://huggingface.co/settings/inference-providers 에서 해당 provider 활성화 (Together AI / Cerebras / Hyperbolic 등)
 3. 또는 설정 탭에서 다른 모델로 변경
+            """,
+        )
+        return
+
+    # OpenAI — Responses API 전용 모델 (gpt-5-pro, o1-pro 등) → Chat Completions 거부
+    if 'v1/responses' in el or 'only supported in v1/responses' in el:
+        show(
+            '이 모델은 OpenAI 의 Responses API 전용 — 우리 앱은 호환되지 않습니다.',
+            """
+**원인:** `gpt-5-pro`, `o1-pro` 같은 "Pro" 등급 일부 모델은 OpenAI 의 새 `/v1/responses` 엔드포인트로만 제공됩니다. 본 앱은 표준 `/v1/chat/completions` 를 사용해 호출 자체가 거부됩니다.
+
+**해결: 설정 → OpenAI 모델 변경.** 다음은 Chat Completions 로 정상 동작합니다:
+
+- `gpt-5` — Pro 의 약 7할 성능, 같은 추론
+- `gpt-5-mini` — 빠르고 저렴, 일반 RAG 충분
+- `gpt-4.1` — 안정적인 차세대
+- `o3` — 추론 강화 (논문 분석 / 수학에 강함)
+- `o4-mini` — 추론 + 빠름
             """,
         )
         return
