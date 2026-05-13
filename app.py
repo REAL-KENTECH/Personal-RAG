@@ -411,6 +411,11 @@ def _init_state():
         'retrieve_top_n': 20,
         'final_top_k': 5,
         'use_reranker': not Path('/mount/src').exists(),
+        # Route dense retrieval through Supabase pgvector when both this flag
+        # is ON and a Supabase client is configured. Default OFF — user
+        # opts in after running db_schema_pgvector.sql and seeing the cache
+        # tab confirm that chunks are being upserted.
+        'use_pgvector_search': False,
 
         # query expansion config
         'use_hyde': False,
@@ -574,6 +579,7 @@ _PERSIST_KEYS = (
     'tavily_key', 'brave_key',
     'embedder_model', 'chunk_size', 'chunk_overlap',
     'retrieval_mode', 'retrieve_top_n', 'final_top_k', 'use_reranker',
+    'use_pgvector_search',
     'use_contextual_rewrite', 'use_multi_query', 'use_hyde', 'n_paraphrases',
     'per_doc_balance', 'per_doc_reserve', 'comparison_autodetect',
     'include_page_images', 'max_page_images',
@@ -975,6 +981,7 @@ def log_turn_structured(user_input: str, response_text: str, reasoning: str,
         'retrieve_top_n': st.session_state.get('retrieve_top_n'),
         'final_top_k': st.session_state.get('final_top_k'),
         'use_reranker': st.session_state.get('use_reranker'),
+        'use_pgvector_search': st.session_state.get('use_pgvector_search'),
         'use_hyde': st.session_state.get('use_hyde'),
         'use_multi_query': st.session_state.get('use_multi_query'),
         'n_paraphrases': st.session_state.get('n_paraphrases'),
@@ -1494,7 +1501,81 @@ def _flatten_chunks(docs: list):
     return all_chunks, np.vstack(all_embs), meta
 
 
+def _dense_search_pgvector(query: str, top_n: int):
+    """Top-k cosine search via Supabase pgvector RPC. Returns the same shape
+    as the in-memory variant — (chunk_idx_within_doc, score, meta, text) —
+    where meta is (doc_id, doc_name, chunk_idx). Falls back to None on any
+    issue so the caller can revert to the in-memory path."""
+    client = _supabase_client()
+    if client is None:
+        return None
+    embedder_id = st.session_state['embedder_model']
+    mapping = _EMBEDDER_TABLE_MAP.get(embedder_id)
+    if mapping is None:
+        return None
+    _short_name, _vec_col, _dim = mapping
+    rpc_name = ('match_chunks_minilm' if embedder_id.endswith('MiniLM-L12-v2')
+                else 'match_chunks_bgem3')
+
+    embedder = load_embedder(embedder_id)
+    q = embedder.encode(
+        [query], convert_to_numpy=True, normalize_embeddings=True,
+        show_progress_bar=False,
+    )[0]
+
+    # Honor the chat-side document filter so pgvector doesn't return chunks
+    # the user has hidden.
+    doc_filter = st.session_state.get('chat_doc_filter') or []
+    docs = st.session_state.get('docs') or []
+    if doc_filter and len(doc_filter) < len(docs):
+        p_doc_ids = list(doc_filter)
+    else:
+        p_doc_ids = None
+
+    try:
+        params = {
+            'p_user_id': st.session_state.get('user_id', '_local'),
+            'p_query_embedding': q.tolist(),
+            'p_match_count': int(top_n),
+            'p_doc_ids': p_doc_ids,
+        }
+        resp = client.rpc(rpc_name, params).execute()
+        rows = resp.data or []
+    except Exception as e:
+        st.session_state['_pgv_search_last_err'] = (
+            f'{rpc_name}: {type(e).__name__}: {str(e)[:600]}'
+        )
+        return None
+
+    if not rows:
+        # Empty result is a legitimate answer; surface it as such instead
+        # of silently falling back, so users notice if their data isn't in
+        # pgvector yet (e.g. ingested before the schema was applied).
+        st.session_state['_pgv_search_last_n'] = 0
+        return []
+
+    out = []
+    for r in rows:
+        meta = (r.get('doc_id'), r.get('doc_name'), int(r.get('chunk_idx', 0)))
+        out.append((
+            int(r.get('id', 0)),
+            float(r.get('score', 0.0)),
+            meta,
+            r.get('text') or '',
+        ))
+    st.session_state['_pgv_search_last_n'] = len(out)
+    return out
+
+
 def dense_search(query: str, top_n: int):
+    # Route to pgvector when the user has opted in (Phase 2b). On any
+    # failure or when the result is unusable, transparently fall back to
+    # the in-memory numpy path.
+    if st.session_state.get('use_pgvector_search'):
+        pg = _dense_search_pgvector(query, top_n)
+        if pg is not None:
+            return pg
+
     docs = st.session_state['docs']
     chunks, embs, meta = _flatten_chunks(docs)
     if not chunks:
@@ -3445,6 +3526,25 @@ def view_settings():
             value=st.session_state['use_reranker'],
             help='추가 모델로 검색 결과를 정밀하게 재정렬합니다. 정확도는 올라가고 응답은 약간 느려집니다.',
         )
+        # pgvector dense search toggle — only useful when Supabase is wired up
+        # AND the user has applied db_schema_pgvector.sql. We still expose the
+        # toggle in single-tenant local mode so devs can flip it; if Supabase
+        # isn't configured the retrieve helper transparently falls back to the
+        # in-memory numpy path.
+        _pgv_available = _supabase_client() is not None
+        st.session_state['use_pgvector_search'] = st.checkbox(
+            'pgvector 로 의미 검색 (Supabase)',
+            value=st.session_state['use_pgvector_search'],
+            help=(
+                'Supabase 의 pgvector 인덱스를 이용해 dense 검색을 수행합니다. '
+                'Cloud 컨테이너 재시작 후에도 이전 사용자의 인덱스가 그대로 살아 '
+                '있어서 첫 사용도 빠릅니다. db_schema_pgvector.sql 을 먼저 실행해 '
+                '주세요. 실패하면 자동으로 로컬 검색으로 폴백합니다.'
+            ),
+            disabled=not _pgv_available,
+        )
+        if not _pgv_available and st.session_state['use_pgvector_search']:
+            st.caption('Supabase 미연동 상태라 토글이 비활성화되어 있습니다.')
         st.session_state['use_contextual_rewrite'] = st.checkbox(
             '이어지는 질문 자동 보완',
             value=st.session_state['use_contextual_rewrite'],
@@ -3672,6 +3772,23 @@ def view_cache():
                 'Supabase 의 `doc_chunks` 테이블에도 자동 저장됩니다 '
                 '(스키마 적용 필요: `db_schema_pgvector.sql`).'
             )
+
+        # Active dense retrieval source.
+        if st.session_state.get('use_pgvector_search'):
+            n = st.session_state.get('_pgv_search_last_n')
+            err = st.session_state.get('_pgv_search_last_err')
+            if err:
+                st.warning(
+                    f'의미 검색 경로: pgvector (직전 호출 실패 → 로컬 폴백). '
+                )
+                with st.expander('마지막 pgvector 검색 에러', expanded=False):
+                    st.code(err)
+            elif n is None:
+                st.caption('의미 검색 경로: pgvector (아직 호출 없음)')
+            else:
+                st.caption(f'의미 검색 경로: pgvector — 직전 호출 {n}건 반환')
+        else:
+            st.caption('의미 검색 경로: 로컬 numpy (in-memory)')
     else:
         if _is_streamlit_cloud():
             st.warning(
