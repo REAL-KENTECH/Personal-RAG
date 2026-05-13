@@ -308,14 +308,19 @@ def _init_state():
         'enable_thinking': True,
         'stream': True,
 
-        # rag config
-        'embedder_model': EMBEDDER_CHOICES[0],
+        # rag config — on Streamlit Cloud free tier RAM is ~1 GB, which is
+        # below BGE-M3 (~2.2 GB) + reranker (~580 MB). Default to the lighter
+        # MiniLM + reranker off there so the app doesn't OOM on first PDF.
+        'embedder_model': (
+            'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
+            if Path('/mount/src').exists() else EMBEDDER_CHOICES[0]
+        ),
         'chunk_size': 600,
         'chunk_overlap': 80,
         'retrieval_mode': 'hybrid',   # 'dense' | 'bm25' | 'hybrid'
         'retrieve_top_n': 20,
         'final_top_k': 5,
-        'use_reranker': True,
+        'use_reranker': not Path('/mount/src').exists(),
 
         # query expansion config
         'use_hyde': False,
