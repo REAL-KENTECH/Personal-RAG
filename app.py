@@ -490,14 +490,26 @@ def _user_prefs_path() -> Path:
 
 def _load_user_prefs():
     """Override session_state defaults with whatever was last saved for this
-    user. Env / secrets values stay in session_state until disk overrides them,
-    so a non-empty disk value wins (user explicitly entered it)."""
+    user. Env / secrets values stay in session_state until disk overrides them.
+
+    Crucial: this must run only ONCE per Streamlit session. Otherwise every
+    rerun (e.g. when a sidebar button sets active_view='settings') would
+    immediately overwrite the just-clicked value with the previously-saved
+    disk value, making the UI feel unresponsive.
+
+    After an idle reconnect, session_state is wiped → the _prefs_loaded flag
+    is gone → this function runs again and restores the user's last state.
+    """
+    if st.session_state.get('_prefs_loaded'):
+        return
     p = _user_prefs_path()
     if not p.exists():
+        st.session_state['_prefs_loaded'] = True
         return
     try:
         data = json.loads(p.read_text())
     except Exception:
+        st.session_state['_prefs_loaded'] = True
         return
     for k in _PERSIST_KEYS:
         if k not in data:
@@ -509,6 +521,7 @@ def _load_user_prefs():
             # Don't clobber an env-loaded key with an empty saved string.
             continue
         st.session_state[k] = v
+    st.session_state['_prefs_loaded'] = True
 
 
 def _save_user_prefs():
@@ -2477,7 +2490,7 @@ with st.sidebar:
                 'query_variants_per_turn', 'current_session_id',
                 'current_session_title', 'current_session_created_at',
                 'docs', 'doc_embs', 'doc_meta',
-                '_loaded_for_embedder', '_prefs_snapshot',
+                '_loaded_for_embedder', '_prefs_snapshot', '_prefs_loaded',
             )
             # Also clear all persistable preference keys so the next user does
             # not inherit the previous one's API keys / model / settings.
