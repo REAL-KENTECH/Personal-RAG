@@ -291,11 +291,13 @@ def _init_state():
         'provider': 'Hugging Face Router',
         'model': 'google/gemma-4-31B-it',
         'base_url': os.getenv('OPENAI_BASE_URL', 'https://router.huggingface.co/v1'),
-        'api_key': (
-            os.getenv('HF_TOKEN')
-            or os.getenv('OPENAI_API_KEY')
-            or os.getenv('DASHSCOPE_API_KEY', '')
-        ),
+
+        # Per-provider API keys. Stored separately so switching providers
+        # does not overwrite a manually entered key.
+        'hf_api_key': os.getenv('HF_TOKEN', ''),
+        'openai_api_key': os.getenv('OPENAI_API_KEY', ''),
+        'dashscope_api_key': os.getenv('DASHSCOPE_API_KEY', ''),
+        'custom_api_key': '',
 
         # generation
         'max_tokens': 8192,
@@ -805,11 +807,24 @@ def _make_openai_client(base_url: str, api_key: str):
     return OpenAI(base_url=base_url, api_key=api_key)
 
 
+def _active_api_key() -> str:
+    """Return the API key for the currently selected provider."""
+    p = st.session_state.get('provider', 'Hugging Face Router')
+    if p == 'Hugging Face Router':
+        return st.session_state.get('hf_api_key', '') or ''
+    if p == 'OpenAI':
+        return st.session_state.get('openai_api_key', '') or ''
+    if p == 'DashScope (Qwen)':
+        return st.session_state.get('dashscope_api_key', '') or ''
+    # vLLM / local / Custom
+    return st.session_state.get('custom_api_key', '') or ''
+
+
 def get_openai_client():
     """Resolve the active OpenAI-compatible client from session state."""
     return _make_openai_client(
         st.session_state.get('base_url') or '',
-        st.session_state.get('api_key') or '',
+        _active_api_key(),
     )
 
 
@@ -2024,9 +2039,12 @@ def model_picker(label: str, key_prefix: str):
 def handle_chat_turn(user_input: str):
     """Process one user turn: retrieve, call LLM, render, persist to history."""
     if (not st.session_state['model']
-            or not st.session_state['api_key']
+            or not _active_api_key()
             or not st.session_state['base_url']):
-        st.error('Settings 탭에서 Model · Base URL · API Key 를 모두 입력해 주세요.')
+        provider = st.session_state.get('provider', 'Hugging Face Router')
+        st.error(
+            f'설정 탭에서 모델 · 엔드포인트 · {provider} 용 API 키를 모두 입력해 주세요.'
+        )
         return
 
     local_active = bool(st.session_state['docs'])
@@ -2574,12 +2592,6 @@ def view_settings():
             cfg = PROVIDERS[new_provider]
             if cfg['base_url']:
                 st.session_state['base_url'] = cfg['base_url']
-            if cfg['env_key']:
-                env_val = os.getenv(cfg['env_key'], '')
-                if env_val:
-                    st.session_state['api_key'] = env_val
-                elif cfg['env_key'] != 'HF_TOKEN':
-                    st.session_state['api_key'] = ''
             if cfg['default_model']:
                 st.session_state['model'] = cfg['default_model']
             st.session_state['provider'] = new_provider
@@ -2587,14 +2599,39 @@ def view_settings():
         else:
             st.session_state['provider'] = new_provider
 
-        env_hint = PROVIDERS[new_provider]['env_key']
-        if env_hint:
-            st.caption(f'API 키 환경변수: `{env_hint}`')
-
         model_picker('모델 이름', key_prefix='settings')
-        st.session_state['api_key'] = st.text_input(
-            'API 키', st.session_state['api_key'], type='password',
-            help='.env에서 자동 로드됩니다. 여기서 직접 덮어쓸 수도 있습니다.',
+
+        # Per-provider API keys — all four shown so user can pre-fill once
+        # and switch providers without losing the others. The "(사용 중)"
+        # label marks which one is sent to the LLM for the current provider.
+        active_p = st.session_state.get('provider', 'Hugging Face Router')
+
+        def _key_label(name, env_name, owner):
+            tag = ' (사용 중)' if owner == active_p else ''
+            return f'{name} ({env_name}){tag}'
+
+        st.markdown('**API 키 (공급자별로 따로 저장)**')
+        st.session_state['hf_api_key'] = st.text_input(
+            _key_label('Hugging Face 토큰', 'HF_TOKEN', 'Hugging Face Router'),
+            st.session_state.get('hf_api_key', ''), type='password',
+            help='Hugging Face Router (gemma / DeepSeek / Qwen 등) 사용 시 필요.',
+        )
+        st.session_state['openai_api_key'] = st.text_input(
+            _key_label('OpenAI API 키', 'OPENAI_API_KEY', 'OpenAI'),
+            st.session_state.get('openai_api_key', ''), type='password',
+            help='OpenAI (gpt-4o / gpt-5 / o3 등) 사용 시 필요.',
+        )
+        st.session_state['dashscope_api_key'] = st.text_input(
+            _key_label('DashScope API 키', 'DASHSCOPE_API_KEY', 'DashScope (Qwen)'),
+            st.session_state.get('dashscope_api_key', ''), type='password',
+            help='Alibaba DashScope (Qwen 공식 API) 사용 시 필요.',
+        )
+        st.session_state['custom_api_key'] = st.text_input(
+            _key_label('Custom / vLLM 키', '', 'vLLM / local')
+            if active_p in ('vLLM / local', 'Custom')
+            else 'Custom / vLLM 키',
+            st.session_state.get('custom_api_key', ''), type='password',
+            help='vLLM 등 셀프 호스팅 / 직접 입력하는 OpenAI-호환 엔드포인트용.',
         )
         st.session_state['stream'] = st.checkbox(
             '스트리밍 응답', value=st.session_state['stream'],
@@ -3283,9 +3320,12 @@ def view_agents():
 
     if submitted:
         if (not st.session_state['model']
-                or not st.session_state['api_key']
+                or not _active_api_key()
                 or not st.session_state['base_url']):
-            st.error('설정 탭에서 공급자/모델/API 키를 먼저 확인해 주세요.')
+            provider = st.session_state.get('provider', 'Hugging Face Router')
+            st.error(
+                f'설정 탭에서 공급자/모델/{provider} 용 API 키를 먼저 확인해 주세요.'
+            )
             st.stop()
         if task.get('requires_docs') and not st.session_state['docs']:
             st.stop()
