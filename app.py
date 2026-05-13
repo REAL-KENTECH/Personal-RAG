@@ -604,6 +604,11 @@ def _init_state():
         # OpenAI-style tool calling (gpt-5, gpt-4.1, Qwen3, Llama-3.x, ...).
         'use_agentic_search': False,
         'agentic_max_iters': 3,
+        # When True, skip retrieval entirely and let the LLM answer from its
+        # own knowledge — useful when the user wants a quick general chat
+        # without uploading documents or when documents are loaded but
+        # the question is off-topic.
+        'general_chat_mode': False,
 
         # query expansion config
         'use_hyde': False,
@@ -881,6 +886,7 @@ _PERSIST_KEYS = (
     'embedder_model', 'chunk_size', 'chunk_overlap',
     'retrieval_mode', 'retrieve_top_n', 'final_top_k', 'use_reranker',
     'use_pgvector_search', 'use_agentic_search', 'agentic_max_iters',
+    'general_chat_mode',
     'use_contextual_rewrite', 'use_multi_query', 'use_hyde', 'n_paraphrases',
     'per_doc_balance', 'per_doc_reserve', 'comparison_autodetect',
     'include_page_images', 'max_page_images',
@@ -1314,6 +1320,7 @@ def log_turn_structured(user_input: str, response_text: str, reasoning: str,
         'use_reranker': st.session_state.get('use_reranker'),
         'use_pgvector_search': st.session_state.get('use_pgvector_search'),
         'use_agentic_search': st.session_state.get('use_agentic_search'),
+        'general_chat_mode': st.session_state.get('general_chat_mode'),
         'agentic_max_iters': st.session_state.get('agentic_max_iters'),
         'use_hyde': st.session_state.get('use_hyde'),
         'use_multi_query': st.session_state.get('use_multi_query'),
@@ -3677,8 +3684,9 @@ def handle_chat_turn(user_input: str):
         )
         return
 
-    local_active = bool(st.session_state['docs'])
-    web_active = bool(st.session_state['web_enabled'])
+    general_only = bool(st.session_state.get('general_chat_mode'))
+    local_active = (not general_only) and bool(st.session_state['docs'])
+    web_active = (not general_only) and bool(st.session_state['web_enabled'])
     rag_active = local_active or web_active
 
     with st.chat_message('user'):
@@ -3902,11 +3910,16 @@ with st.sidebar:
     if len(model_short) > 32:
         model_short = model_short[:29] + '...'
     st.caption(f"모델: `{model_short}`")
-    if n_docs:
+    if st.session_state.get('general_chat_mode'):
+        st.caption(
+            '모드: 일반 대화 (RAG 끔)'
+            + (f' · 문서 {n_docs}개 보유' if n_docs else '')
+        )
+    elif n_docs:
         st.caption(f"문서 {n_docs}개 · 청크 {n_chunks}개")
     else:
         st.caption('문서 없음 (일반 챗)')
-    if st.session_state['web_enabled']:
+    if st.session_state['web_enabled'] and not st.session_state.get('general_chat_mode'):
         st.caption(f"웹 검색: {st.session_state['web_provider']}")
 
     # ----- User / logout -----
@@ -4440,6 +4453,15 @@ def view_settings():
             '정확도 우선 (재정렬 모델 사용)',
             value=st.session_state['use_reranker'],
             help='추가 모델로 검색 결과를 정밀하게 재정렬합니다. 정확도는 올라가고 응답은 약간 느려집니다.',
+        )
+        # Bypass RAG entirely — useful for quick general chats, off-topic
+        # questions, or comparing the model's base knowledge against its
+        # RAG-augmented answers.
+        st.session_state['general_chat_mode'] = st.checkbox(
+            '일반 대화 모드 (문서 검색 끔)',
+            value=st.session_state['general_chat_mode'],
+            help='업로드한 문서나 웹 검색을 건너뛰고 LLM 본연의 지식만으로 답합니다. '
+            '문서가 있어도 강제로 RAG 를 사용하지 않습니다.',
         )
         # pgvector dense search toggle — only useful when Supabase is wired up
         # AND the user has applied db_schema_pgvector.sql. We still expose the
