@@ -5,6 +5,7 @@ numpy
 sentence-transformers>=2.7
 huggingface_hub
 pypdf
+python-docx
 rank_bm25
 ddgs
 requests

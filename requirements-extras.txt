@@ -7,9 +7,14 @@
 #
 # Graceful fallbacks if any of these are missing:
 #   docling  → falls back to pypdf (no table/heading structure)
-#   pymupdf  → no PDF page-image rendering (multimodal feature disabled)
+#   pymupdf  → no PDF page-image rendering AND no scanned-PDF OCR
+#   pytesseract + Pillow → OCR fallback for scanned PDFs (requires the
+#     system tesseract binary too, e.g. on Debian/Ubuntu:
+#       apt-get install tesseract-ocr tesseract-ocr-kor)
 #   tavily-python → only when Tavily provider is selected
 
 docling
 pymupdf
+pytesseract
+Pillow
 tavily-python
