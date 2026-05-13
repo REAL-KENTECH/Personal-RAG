@@ -2593,20 +2593,29 @@ def view_chat():
         else:
             text_part = (submitted or '').strip()
 
-        # Ingest any attached files first so they're searchable for the same turn.
+        # Ingest any attached files first so they're searchable on the same turn.
+        # ingest_files() appends to st.session_state['docs'] and saves to disk,
+        # so the files immediately show up in the Documents tab too.
+        added = 0
         if file_part:
             with st.spinner(f'{len(file_part)}개 파일 인덱싱 중...'):
                 added = ingest_files(file_part)
             if added > 0:
                 try:
-                    st.toast(f'{added}개 문서 인덱싱 완료 — 이번 질문부터 검색 대상')
+                    st.toast(
+                        f'{added}개 문서 인덱싱 완료 — 문서 탭에 추가되었고 '
+                        '이번 질문부터 검색 대상입니다.'
+                    )
                 except Exception:
                     pass
 
         if text_part:
             handle_chat_turn(text_part)
-        elif file_part:
-            # Files-only submission: just acknowledge, no LLM call.
+
+        # Rerun after any file ingest so the sidebar status counter and
+        # the Documents tab list refresh immediately (otherwise they stay
+        # stale until the next user interaction).
+        if added > 0:
             st.rerun()
 
 
