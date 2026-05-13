@@ -716,8 +716,19 @@ def _auth_gate():
       3) Streamlit Cloud, no auth backend at all → anonymous per-browser UUID.
       4) Local dev, no auth backend → single-tenant '_local'.
     """
-    if 'user_id' in st.session_state and st.session_state['user_id']:
-        return
+    current_uid = st.session_state.get('user_id', '')
+
+    # Migration: if an auth backend was just enabled but the browser still has
+    # a stale anonymous user_id from before the backend existed, drop it so
+    # the login screen actually appears. Otherwise the gate keeps short-
+    # circuiting on the old anon id and the user never sees a login form.
+    if current_uid.startswith('_anon_') and (
+            _supabase_users_enabled() or USERS_FROM_SECRETS):
+        st.session_state['user_id'] = ''
+        current_uid = ''
+
+    if current_uid:
+        return  # already logged in (real account or anon/local fallback)
 
     if _supabase_users_enabled():
         _render_login_screen()
