@@ -37,7 +37,7 @@ create or replace function public.signup_user(
 returns table(success boolean, message text, user_id bigint)
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions
 as $$
 declare
     new_id bigint;
@@ -72,7 +72,7 @@ create or replace function public.login_user(
 returns table(success boolean, message text, user_id bigint)
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions
 as $$
 declare
     rec     record;
