@@ -41,6 +41,18 @@ streamlit run step9_app_complete.py
 Streamlit 끝낼 때는 터미널에서 Ctrl+C.
 
 
+## 노트북으로 따라가고 싶다면
+
+step1~6 흐름을 셀 단위로 정리한 `tutorial.ipynb` 가 같은 폴더에 있다.
+
+```bash
+pip install jupyterlab
+jupyter lab tutorial.ipynb
+```
+
+VS Code 에서 ipynb 를 직접 열어도 된다.
+
+
 ## 백엔드 바꾸기
 
 `.env` 의 `BACKEND` 한 줄 수정 후:

@@ -46,7 +46,7 @@ HF_TOKEN=hf_...
 
 ## 단계
 
-step1 부터 step6 까지는 일반 파이썬 스크립트, step7 부터 step9 는 Streamlit.
+step1 부터 step6 까지는 일반 파이썬 스크립트, step7 부터 step9 는 Streamlit. 셀 단위로 결과 보면서 따라가고 싶으면 같은 내용이 [`tutorial.ipynb`](tutorial.ipynb) 노트북으로도 정리돼 있다.
 
 | step | 무얼 한다 | 실행 |
 |---|---|---|
