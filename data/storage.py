@@ -24,11 +24,11 @@ from pathlib import Path
 import numpy as np
 import streamlit as st
 
-from ..auth.supabase_io import (
+from auth.supabase_io import (
     _scrub_for_postgres,
     _supabase_client,
 )
-from ..auth.users import _log_event, _user_data_dir
+from auth.users import _log_event, _user_data_dir
 
 
 def _safe_name(s: str) -> str:

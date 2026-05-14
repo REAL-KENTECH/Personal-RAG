@@ -13,7 +13,7 @@ all consumers degrade gracefully.
 import base64
 from pathlib import Path
 
-from .config import FAVICON_PATH, LOGO_PATH
+from config import FAVICON_PATH, LOGO_PATH
 
 
 def _b64(path: Path) -> str:

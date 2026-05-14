@@ -25,8 +25,8 @@ from pathlib import Path
 
 import streamlit as st
 
-from ..auth.supabase_io import _supabase_client
-from ..auth.users import _log_event, _user_logs_dir, _user_sessions_dir
+from auth.supabase_io import _supabase_client
+from auth.users import _log_event, _user_logs_dir, _user_sessions_dir
 
 
 def _new_session_id() -> str:

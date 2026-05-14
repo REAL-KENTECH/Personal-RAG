@@ -2,11 +2,11 @@
 
 import streamlit as st
 
-from ..branding import LOGO_URI
-from ..data.sessions import load_session, rename_session
-from ..llm.chat import handle_chat_turn, render_assistant
-from ..processing.ingestion import ingest_files
-from ..ui.widgets import model_picker
+from branding import LOGO_URI
+from data.sessions import load_session, rename_session
+from llm.chat import handle_chat_turn, render_assistant
+from processing.ingestion import ingest_files
+from ui.widgets import model_picker
 
 
 def view_chat():

@@ -2,13 +2,13 @@
 
 import streamlit as st
 
-from ..auth.prefs import _save_user_prefs
-from ..auth.supabase_io import _supabase_client
-from ..config import EMBEDDER_CHOICES, PROVIDER_NAMES, PROVIDERS
-from ..data.storage import load_all_for_current_embedder
-from ..llm.clients import _active_api_key
-from ..ui.helpers import _section
-from ..ui.widgets import model_picker
+from auth.prefs import _save_user_prefs
+from auth.supabase_io import _supabase_client
+from config import EMBEDDER_CHOICES, PROVIDER_NAMES, PROVIDERS
+from data.storage import load_all_for_current_embedder
+from llm.clients import _active_api_key
+from ui.helpers import _section
+from ui.widgets import model_picker
 
 
 def view_settings():

@@ -2,10 +2,10 @@
 
 import streamlit as st
 
-from ..llm.chat import _citation_body, _citation_summary
-from ..processing.ingestion import ingest_files, reindex_all, remove_doc
-from ..retrieval.pipeline import retrieve_local
-from ..ui.helpers import _empty, _section
+from llm.chat import _citation_body, _citation_summary
+from processing.ingestion import ingest_files, reindex_all, remove_doc
+from retrieval.pipeline import retrieve_local
+from ui.helpers import _empty, _section
 
 
 def view_docs():

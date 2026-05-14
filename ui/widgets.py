@@ -9,8 +9,8 @@ chat top-bar quick switch (selecting applies immediately).
 
 import streamlit as st
 
-from ..auth.prefs import _save_user_prefs
-from ..config import _CUSTOM, PROVIDER_MODELS, PROVIDER_NAMES
+from auth.prefs import _save_user_prefs
+from config import _CUSTOM, PROVIDER_MODELS, PROVIDER_NAMES
 
 
 def model_picker(label: str, key_prefix: str, instant: bool = False):

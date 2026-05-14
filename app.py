@@ -35,19 +35,19 @@ warnings.filterwarnings('ignore', message=r'.*__path__.*')
 import streamlit as st
 from dotenv import load_dotenv
 
-from personal_rag.auth.prefs import _load_user_prefs, _save_user_prefs
-from personal_rag.auth.users import _auth_gate
-from personal_rag.branding import FAVICON
-from personal_rag.config import APP_CSS, DATA_DIR, LOGS_DIR
-from personal_rag.data.storage import load_all_for_current_embedder
-from personal_rag.state import _init_state
-from personal_rag.ui.sidebar import render_sidebar
-from personal_rag.views.about import view_about
-from personal_rag.views.agents import view_agents
-from personal_rag.views.cache import view_cache
-from personal_rag.views.chat import view_chat
-from personal_rag.views.docs import view_docs
-from personal_rag.views.settings import view_settings
+from auth.prefs import _load_user_prefs, _save_user_prefs
+from auth.users import _auth_gate
+from branding import FAVICON
+from config import APP_CSS, DATA_DIR, LOGS_DIR
+from data.storage import load_all_for_current_embedder
+from state import _init_state
+from ui.sidebar import render_sidebar
+from views.about import view_about
+from views.agents import view_agents
+from views.cache import view_cache
+from views.chat import view_chat
+from views.docs import view_docs
+from views.settings import view_settings
 
 
 # -----------------------------------------------------------------------------

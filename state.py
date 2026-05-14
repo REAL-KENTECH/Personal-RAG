@@ -18,7 +18,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from .config import EMBEDDER_CHOICES
+from config import EMBEDDER_CHOICES
 
 
 def _init_state():

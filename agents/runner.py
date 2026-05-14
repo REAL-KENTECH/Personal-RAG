@@ -17,19 +17,19 @@ import time
 
 import streamlit as st
 
-from ..auth.supabase_io import _supabase_insert
-from ..auth.users import _agent_log_path
-from ..llm.chat import non_stream_chat, split_thinking, stream_chat
-from ..llm.clients import get_openai_client
-from ..llm.params import (
+from auth.supabase_io import _supabase_insert
+from auth.users import _agent_log_path
+from llm.chat import non_stream_chat, split_thinking, stream_chat
+from llm.clients import get_openai_client
+from llm.params import (
     _build_completion_params,
     _is_dashscope_endpoint,
     _is_hf_router_endpoint,
     _is_openai_endpoint,
     _provider_supports_top_k,
 )
-from ..retrieval.pipeline import retrieve_local
-from ..retrieval.web import web_search
+from retrieval.pipeline import retrieve_local
+from retrieval.web import web_search
 from .templates import AGENT_TASKS
 
 

@@ -22,8 +22,8 @@ from pathlib import Path
 
 import streamlit as st
 
-from ..branding import LOGO_URI
-from ..config import DATA_DIR, LOGS_DIR
+from branding import LOGO_URI
+from config import DATA_DIR, LOGS_DIR
 from .supabase_io import (
     _supabase_insert,
     _supabase_login,

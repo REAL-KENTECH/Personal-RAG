@@ -11,8 +11,8 @@ import re
 
 import streamlit as st
 
-from ..llm.clients import get_openai_client
-from ..llm.params import _build_completion_params, _thinking_off_extra_body
+from llm.clients import get_openai_client
+from llm.params import _build_completion_params, _thinking_off_extra_body
 
 
 def rewrite_with_context(query: str) -> str:

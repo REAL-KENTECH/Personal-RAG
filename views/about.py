@@ -2,7 +2,7 @@
 
 import streamlit as st
 
-from ..branding import LOGO_URI
+from branding import LOGO_URI
 
 
 def view_about():

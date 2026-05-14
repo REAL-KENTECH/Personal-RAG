@@ -28,15 +28,15 @@ import time
 
 import streamlit as st
 
-from ..auth.supabase_io import _supabase_insert
-from ..auth.users import _log_event
-from ..data.sessions import (
+from auth.supabase_io import _supabase_insert
+from auth.users import _log_event
+from data.sessions import (
     _new_session_id,
     _session_jsonl_path,
     save_current_session,
 )
-from ..data.storage import load_page_image_b64
-from ..retrieval.pipeline import retrieve, retrieve_local
+from data.storage import load_page_image_b64
+from retrieval.pipeline import retrieve, retrieve_local
 from .clients import _active_api_key, get_openai_client
 from .params import (
     _build_completion_params,

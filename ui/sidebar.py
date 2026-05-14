@@ -9,10 +9,10 @@ keeps the rail in sync with whichever button just triggered the rerun.
 
 import streamlit as st
 
-from ..auth.prefs import _PERSIST_KEYS
-from ..auth.users import _log_event
-from ..branding import LOGO_URI
-from ..data.sessions import (
+from auth.prefs import _PERSIST_KEYS
+from auth.users import _log_event
+from branding import LOGO_URI
+from data.sessions import (
     delete_session,
     list_sessions,
     load_session,

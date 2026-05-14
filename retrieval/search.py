@@ -15,10 +15,10 @@ import re
 import numpy as np
 import streamlit as st
 
-from ..auth.supabase_io import _supabase_client
-from ..config import RERANKER_MODEL
-from ..data.storage import _EMBEDDER_TABLE_MAP
-from ..llm.clients import load_embedder, load_reranker
+from auth.supabase_io import _supabase_client
+from config import RERANKER_MODEL
+from data.storage import _EMBEDDER_TABLE_MAP
+from llm.clients import load_embedder, load_reranker
 
 
 def _tokenize_for_bm25(text: str):

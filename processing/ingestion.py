@@ -13,8 +13,8 @@ import time
 
 import streamlit as st
 
-from ..auth.users import _log_event
-from ..data.storage import (
+from auth.users import _log_event
+from data.storage import (
     _pages_dir,
     _pgvector_delete_doc,
     _pgvector_upsert_doc,
@@ -23,7 +23,7 @@ from ..data.storage import (
     load_doc,
     save_doc,
 )
-from ..llm.clients import load_embedder
+from llm.clients import load_embedder
 from .chunking import chunk_elements, chunk_text
 from .parsing import parse_file, render_pdf_pages_to_dir
 

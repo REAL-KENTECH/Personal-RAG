@@ -4,11 +4,11 @@ import datetime
 
 import streamlit as st
 
-from ..agents.runner import run_agent_task
-from ..agents.templates import AGENT_TASKS
-from ..llm.chat import _show_llm_error
-from ..llm.clients import _active_api_key
-from ..ui.helpers import _section
+from agents.runner import run_agent_task
+from agents.templates import AGENT_TASKS
+from llm.chat import _show_llm_error
+from llm.clients import _active_api_key
+from ui.helpers import _section
 
 
 def view_agents():

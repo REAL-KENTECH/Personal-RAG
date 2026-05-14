@@ -4,9 +4,9 @@ import shutil
 
 import streamlit as st
 
-from ..auth.supabase_io import _supabase_client
-from ..auth.users import _is_streamlit_cloud, _user_data_dir, _user_logs_dir
-from ..ui.helpers import _section
+from auth.supabase_io import _supabase_client
+from auth.users import _is_streamlit_cloud, _user_data_dir, _user_logs_dir
+from ui.helpers import _section
 
 
 def view_cache():
