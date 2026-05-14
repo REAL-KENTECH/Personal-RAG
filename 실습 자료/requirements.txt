@@ -1,21 +1,25 @@
-# RAG 실습 — 최소 의존성
-# 본 프로젝트 메인 앱(../requirements.txt)과 별도. 실습은 LangChain 기반의
-# 단순 RAG 흐름만 다루기 때문에 필요한 패키지가 훨씬 적습니다.
+# 실습 전용 의존성. 본 프로젝트 메인 앱(../requirements.txt)과는 별도다.
 
-# LangChain 코어 + 통합 (최신 버전은 text_splitters 가 별도 패키지로 분리됨)
+# LangChain — text_splitters 는 별도 패키지로 분리됐다 (LangChain 0.3 이후)
 langchain>=0.3
 langchain-community>=0.3
-langchain-openai>=0.2
 langchain-text-splitters>=0.3
 
-# 벡터 DB — 가볍고 로컬에서 잘 동작
+# OpenAI 경로
+langchain-openai>=0.2
+
+# Hugging Face 경로 — 오픈 모델 쓸 때만 실제로 필요하지만 함께 설치해두면 편하다
+langchain-huggingface>=0.1
+sentence-transformers>=2.7
+
+# 벡터 DB
 faiss-cpu>=1.7
 
-# PDF 로더
+# PDF 파서
 pypdf>=4.0
 
-# Streamlit (step 7~9)
+# Streamlit (step7 이후)
 streamlit>=1.40
 
-# .env 파일 자동 로드 (선택)
+# .env 자동 로드
 python-dotenv>=1.0

@@ -1,45 +1,61 @@
 """
-Step 7 — Streamlit 챗 UI 골격 (아직 RAG 없음)
+Step 7. Streamlit 으로 대화 UI 만들기.
 
-목표: 대화형 인터페이스를 만들고 대화 기록을 화면에 누적 표시한다.
-이 단계는 LLM 호출 없이 "AI 자리에 가짜 응답"을 넣어 UI 흐름만 익힌다.
+여기까진 CLI 였다. 사용자가 실제로 쓸 인터페이스를 챗 형태로 띄워본다.
+이 단계는 RAG 가 연결되어 있지 않아서 응답은 가짜로 돌려준다. UI 흐름을
+먼저 익히는 게 목적이다.
 
-실행:
     streamlit run step7_chat_ui.py
 """
 
 import streamlit as st
 
-st.title("실습 챗 UI (단계 7)")
-st.caption("아직 AI 응답은 가짜입니다. 단계 9에서 RAG 연결.")
+from ui_styles import apply_styles, brand, sidebar_section
 
-# 1. 대화 기록 저장소 — session_state는 사용자 새로고침해도 유지되는 dict
+
+st.set_page_config(page_title="실습 챗 UI", layout="wide", initial_sidebar_state="expanded")
+apply_styles()
+
+
+with st.sidebar:
+    brand("실습 챗봇", "step 7 — UI 골격")
+    sidebar_section("상태")
+    msg_count = len(st.session_state.get("messages", []))
+    st.caption(f"누적 메시지: {msg_count}")
+
+    sidebar_section("작업")
+    if st.button("대화 초기화", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+
+st.markdown(
+    '<div class="section-title">실습 챗 UI</div>'
+    '<div class="section-sub">RAG 는 step 9 에서 연결. 지금은 가짜 응답만 돌려준다.</div>',
+    unsafe_allow_html=True,
+)
+
+
+# session_state 에 대화 기록을 누적. Streamlit 은 매 인터랙션마다 스크립트를
+# 위에서 아래로 다시 돌리는데 session_state 만 그 사이에 유지된다.
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# 2. 지금까지의 대화 내역을 화면에 출력
-#    st.chat_message("user" | "assistant") 가 말풍선 UI를 그림
+
+# 지금까지 누적된 대화를 화면에 그린다
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 3. 입력창 — 사용자가 엔터 누르면 prompt 변수에 텍스트 들어옴
-if prompt := st.chat_input("질문을 입력하세요..."):
-    # 3-1. 사용자 발화 화면에 띄우고 기록
+
+# 새 입력 — walrus(:=) 로 변수 할당하면서 None 체크
+if prompt := st.chat_input("질문을 입력하세요"):
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # 3-2. AI 응답 — 단계 9에서 RAG로 교체
-    fake_response = f"(가짜 응답) 받은 질문: '{prompt}'"
+    # step9 에서는 이 자리에 RAG 답변이 들어간다.
+    fake = f"(가짜 응답) 받은 질문: {prompt!r}"
     with st.chat_message("assistant"):
-        st.markdown(fake_response)
-    st.session_state.messages.append({"role": "assistant", "content": fake_response})
-
-# 사이드바에 메타 정보
-with st.sidebar:
-    st.subheader("정보")
-    st.write(f"누적 대화: {len(st.session_state.messages)}개 메시지")
-    if st.button("대화 초기화"):
-        st.session_state.messages = []
-        st.rerun()
+        st.markdown(fake)
+    st.session_state.messages.append({"role": "assistant", "content": fake})

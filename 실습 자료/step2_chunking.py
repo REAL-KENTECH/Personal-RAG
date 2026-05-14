@@ -1,60 +1,44 @@
 """
-Step 2 — 청크(Chunk) 분할
+Step 2. 청크 분할.
 
-목표: 긴 페이지 텍스트를 검색하기 좋은 작은 조각으로 자른다.
-이 step도 외부 API 호출 없음.
+페이지 통으로 LLM 에 넣기엔 너무 길고, 한 문장씩 잘라 넣기엔 문맥이
+날아간다. 적당한 크기로 자르고 인접한 조각끼리 살짝 겹쳐서 경계에서
+끊어진 문맥을 보전한다.
 
-핵심 개념:
-- LLM context는 한정적 → 페이지 통째로 던지면 비효율
-- 너무 짧으면 문맥 손실, 너무 길면 검색 정확도 ↓
-- 일반적으로 chunk_size = 500~1500자, overlap = 10~15%
+대략 가이드:
+- FAQ 같은 짧은 문답: 200~400자
+- 줄글 보고서/규정: 800~1200자
+- overlap 은 chunk_size 의 10~15%
 
-실행:
     python step2_chunking.py
 """
 
-# ─── 이전 단계: PDF 로드 ──────────────────────────────────────────────
 from langchain_community.document_loaders import PyPDFLoader
-
-loader = PyPDFLoader("출장 규정.pdf")
-pages = loader.load()
-print(f"✓ Step 1: {len(pages)}페이지 로드 완료")
-
-# ─── 이번 단계: 청크 분할 ─────────────────────────────────────────────
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# 시나리오에 따라 청크 크기를 조정합니다.
-# 작게 자르면 — 정확한 매칭에 유리. FAQ 같은 짧은 문답형 문서에 적합.
-splitter_small = RecursiveCharacterTextSplitter(
-    chunk_size=300,    # 한 조각 ≈ 300자
-    chunk_overlap=30,  # 인접 조각끼리 30자 겹침 (≈10%)
-)
 
-# 크게 자르면 — 문맥 보존에 유리. 줄글 보고서·규정 문서에 적합.
-splitter_large = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=150,  # 약 15%
-)
+# step1 다시 — pages 가 있어야 자를 게 있다
+pages = PyPDFLoader("출장 규정.pdf").load()
+print(f"step1 결과: {len(pages)}페이지")
 
-# 두 시나리오를 비교해보기 위해 둘 다 실행
-chunks_small = splitter_small.split_documents(pages)
-chunks_large = splitter_large.split_documents(pages)
 
-print(f"\n📊 청크 분할 결과:")
-print(f"  - 작게 분할 (300자): {len(chunks_small)}개 조각")
-print(f"  - 크게 분할 (1000자): {len(chunks_large)}개 조각")
+# 두 가지 시나리오를 직접 비교해 보면 차이가 느껴진다.
+small = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=30)
+large = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
 
-# 다음 단계에서 사용할 변수 — 출장 규정 같은 줄글에는 1000자가 적당
+chunks_small = small.split_documents(pages)
+chunks_large = large.split_documents(pages)
+
+print(f"300자 기준  -> {len(chunks_small)}개 청크")
+print(f"1000자 기준 -> {len(chunks_large)}개 청크")
+print()
+
+# 출장규정처럼 줄글이 긴 문서엔 1000 쪽이 자연스럽다.
 chunks = chunks_large
 
-print(f"\n→ chunks 변수에 {len(chunks)}개 조각 저장 (다음 단계에서 사용)")
+print(f"이후 단계엔 1000자 청크 {len(chunks)}개로 진행한다.")
 print()
-print("─" * 60)
-print(f"📄 첫 번째 청크 미리보기:")
-print("─" * 60)
+print("첫 청크 미리보기:")
 print(chunks[0].page_content[:300])
-print("...")
 print()
-print(f"📋 메타데이터(원본 페이지 번호 포함): {chunks[0].metadata}")
-print()
-print("→ 다음 단계: step3_embed_store.py")
+print(f"메타데이터(원본 페이지 번호가 그대로 남는다): {chunks[0].metadata}")

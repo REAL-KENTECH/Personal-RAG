@@ -1,50 +1,54 @@
 """
-Step 8 — 파일 업로드 위젯
+Step 8. 파일 업로드 위젯.
 
-목표: 사용자가 사이드바에서 PDF 파일을 직접 업로드할 수 있게 한다.
-업로드된 파일은 메모리에 BytesIO 형태로 들어옴 → 다음 단계에서 RAG에 연결.
+step7 까지 PDF 는 코드에 하드코딩돼 있었다. 사용자가 자기 PDF 를
+업로드해서 그 문서에 대해 질문하게 만들려면 file_uploader 가 필요하다.
 
-실행:
+업로드된 객체는 bytes 를 메모리에 들고 있는데, PyPDFLoader 는 경로를
+받기 때문에 step9 에서 임시 파일로 한 번 저장해서 넘긴다.
+
     streamlit run step8_file_upload.py
 """
 
 import streamlit as st
 
-# 메인 화면 제목
-st.title("사내 규정 챗봇 🤖")
-st.caption("PDF를 업로드해야 질문에 답할 수 있습니다 (단계 9에서 완성).")
+from ui_styles import apply_styles, brand, empty, section, sidebar_section
 
-# 사이드바에 파일 업로드 위젯
+
+st.set_page_config(page_title="사내 규정 챗봇", layout="wide", initial_sidebar_state="expanded")
+apply_styles()
+
+
 with st.sidebar:
-    st.header("설정")
+    brand("사내 규정 챗봇", "step 8 — 파일 업로드")
+    sidebar_section("설정")
     uploaded_file = st.file_uploader(
         "PDF 문서를 업로드하세요",
         type=["pdf"],
-        help="여러 페이지의 사내 규정/매뉴얼 등 PDF",
+        help="여러 페이지의 사내 규정/매뉴얼 등",
     )
 
-# 업로드 상태 확인 + 파일 정보 표시
-if uploaded_file is not None:
-    st.success(f"✓ '{uploaded_file.name}' 업로드 완료")
 
-    # 파일 메타데이터
-    file_size_kb = uploaded_file.size / 1024
-    st.write(f"📄 파일 크기: {file_size_kb:.1f} KB")
-    st.write(f"📋 MIME 타입: {uploaded_file.type}")
+section("사내 규정 챗봇", "PDF 를 업로드해야 동작한다. step 9 에서 RAG 와 연결.")
 
-    # uploaded_file 은 BytesIO 객체. .read() 로 바이트 전체 읽기 가능.
-    # (실습 9에서 이 바이트를 PyPDFLoader 가 받을 수 있도록 임시 파일로 저장)
-    raw_bytes = uploaded_file.getvalue()
-    st.write(f"🔢 첫 20 바이트: {raw_bytes[:20]}")
+
+if uploaded_file is None:
+    empty(
+        "좌측 사이드바에서 PDF 파일을 먼저 업로드해 주세요."
+        "<br>샘플 PDF 가 같은 폴더에 있다면 끌어다 놓아도 됩니다."
+    )
 else:
-    st.info("좌측 사이드바에서 PDF 파일을 업로드해주세요.")
+    st.success(f"'{uploaded_file.name}' 업로드 완료")
 
-with st.sidebar:
-    st.divider()
-    st.caption(
-        "단계 9에서:\n"
-        "1) 업로드된 PDF → 페이지 로드\n"
-        "2) 청크 분할 → 임베딩\n"
-        "3) FAISS 인덱스 메모리에 보관\n"
-        "4) 사용자 질문 → 검색 + LLM 답변"
-    )
+    cols = st.columns(3)
+    size_kb = uploaded_file.size / 1024
+    cols[0].metric("파일 크기", f"{size_kb:.1f} KB")
+    cols[1].metric("MIME", uploaded_file.type or "—")
+    cols[2].metric("문서 수", 1)
+
+    # uploaded_file 은 BytesIO. .getvalue() 로 바이트 전체 추출.
+    raw = uploaded_file.getvalue()
+
+    with st.expander("바이트 미리보기 (디버깅용)"):
+        st.code(f"첫 20바이트: {raw[:20]}")
+        st.caption(f"총 {len(raw):,} 바이트")
