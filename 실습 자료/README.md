@@ -46,7 +46,7 @@ HF_TOKEN=hf_...
 
 ## 단계
 
-step1~6 은 일반 파이썬 스크립트, step7~9 는 Streamlit.
+step1 부터 step6 까지는 일반 파이썬 스크립트, step7 부터 step9 는 Streamlit.
 
 | step | 무얼 한다 | 실행 |
 |---|---|---|
@@ -60,7 +60,7 @@ step1~6 은 일반 파이썬 스크립트, step7~9 는 Streamlit.
 | 8 | 파일 업로드 위젯 | `streamlit run step8_file_upload.py` |
 | 9 | 합친 최종 챗봇 | `streamlit run step9_app_complete.py` |
 
-step3 을 한 번 돌리면 `my_faiss_index/` 에 인덱스가 저장돼서 step4~6 은 그걸 재사용한다. 그래서 step3 만 비싸고 나머지는 거의 공짜.
+step3 을 한 번 돌리면 `my_faiss_index/` 에 인덱스가 저장돼서 step4 이후는 그걸 재사용한다. 그래서 step3 만 비싸고 나머지는 거의 공짜.
 
 Streamlit 은 보통 http://localhost:8501 로 자동으로 열린다. 종료는 터미널에서 Ctrl+C.
 
@@ -73,11 +73,11 @@ Streamlit 은 보통 http://localhost:8501 로 자동으로 열린다. 종료는
 
 **`FileNotFoundError: 출장 규정.pdf`** — 실습 폴더 밖에서 실행한 경우. `cd "실습 자료"` 후 실행.
 
-**임베딩이 너무 느림** — 정상이다. step3 한 번만 무겁다. step4~6 은 인덱스 재사용해서 빠르다.
+**임베딩이 너무 느림** — 정상이다. step3 한 번만 무겁다. 이후는 인덱스 재사용해서 빠르다.
 
 **`Port 8501 is already in use`** — 다른 Streamlit 이 떠 있다. 끄거나 `--server.port 8502` 같이 다른 포트로.
 
-**HF 첫 실행 때 ~500MB 다운로드** — 임베더 가중치(sentence-transformers). 한 번 받으면 캐시된다.
+**HF 첫 실행 때 500MB 정도 다운로드** — 임베더 가중치(sentence-transformers). 한 번 받으면 캐시된다.
 
 
 ## 백엔드 바꿀 때
