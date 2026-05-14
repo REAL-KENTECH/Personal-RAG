@@ -1,0 +1,6 @@
+# 실습 중 생성되는 산출물 — 저장소에 올리지 않음
+.env
+.venv/
+my_faiss_index/
+__pycache__/
+*.pyc

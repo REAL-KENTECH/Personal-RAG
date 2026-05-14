@@ -1,0 +1,211 @@
+# step1_load_document.py
+
+# 1. LangChain의 PDF 로더 도구 가져오기
+from langchain_community.document_loaders import PyPDFLoader
+
+# 2. 읽어들일 PDF 파일 지정하기
+loader = PyPDFLoader("출장규정.pdf")
+
+# 3. 문서 로드 실행 (pages 변수에 저장)
+pages = loader.load()
+
+# 4. 결과 확인하기 (총 몇 페이지인지 출력)
+print(f"성공! 총 {len(pages)}페이지를 불러왔습니다.")
+
+# 첫 번째 페이지의 내용 일부 확인해보기 
+print(pages[0].page_content[:100])
+
+
+##
+step2_chunking_tuning.py
+##
+
+# 텍스트 분할기 도구 불러오기
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# [시나리오 A] FAQ 등 짧은 문답형 문서일 때
+splitter_small = RecursiveCharacterTextSplitter(
+    chunk_size=300,  # 작게 자르기
+    chunk_overlap=30 # 10% 겹치기
+)
+
+# [시나리오 B] 긴 줄글 형태의 보고서일 때 
+splitter_large = RecursiveCharacterTextSplitter(
+    chunk_size=1000, # 크게 자르기
+    chunk_overlap=150 # 15% 겹치기
+)
+
+# 문서 자르기 실행 (예: 시나리오 B 적용)
+chunks = splitter_large.split_documents(pages)
+
+print(f"총 {len(chunks)}개의 조각으로 분할되었습니다.")
+
+##
+step3_embed_and_store.py
+
+##
+# 1. 필요한 도구 가져오기
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+
+# 2. 임베딩 모델 설정 (텍스트 -> 숫자 번역기)
+embeddings = OpenAIEmbeddings()
+
+# 3. 조각(chunks)들을 임베딩하여 FAISS DB에 저장
+# (주의: 앞선 실습에서 만든 chunks 변수가 필요합니다)
+vector_db = FAISS.from_documents(chunks, embeddings)
+
+# 4. 결과 확인하기
+print("성공! 벡터 DB 생성 완료!")
+
+# (선택) 나중을 위해 로컬 폴더에 DB 저장해두기 
+vector_db.save_local("my_faiss_index")
+
+##
+
+step3_similarity_search.py
+##
+
+# 1. 사용자의 질문 정의하기
+query = "해외 출장 갔을 때 돈 어떻게 받아?"
+
+# 2. 벡터 DB에서 유사도 검색 실행
+# k=3 은 가장 유사한 문서 조각 3개를 가져오라는 의미입니다. 
+docs = vector_db.similarity_search(query, k=3)
+
+# 3. 검색 결과 확인하기
+print("가장 유사한 문서 조각 1위:")
+print("-" * 30)
+
+# 첫 번째 문서 조각(docs[0])의 텍스트 내용 출력 
+print(docs[0].page_content)
+
+##
+step4_generate_answer.py
+
+##
+# 1. LLM 모델 불러오기
+from langchain_openai import ChatOpenAI
+llm = ChatOpenAI(model="gpt-4o", temperature=0)
+
+# 2. 프롬프트 템플릿 설정
+from langchain_core.prompts import PromptTemplate
+prompt = PromptTemplate.from_template(
+    """당신은 사내 규정 안내 챗봇입니다. 아래 [검색된 문서]만 참고하여 답변하세요. 
+    [검색된 문서] {context} 
+    [사용자 질문] {question}"""
+)
+
+# 3. 체인(Chain) 연결: 프롬프트 -> LLM
+chain = prompt | llm
+
+# 4. 실행 및 답변 생성 
+# (docs[0].page_content는 앞서 검색한 문서 조각) 
+response = chain.invoke({
+    "context": docs[0].page_content, 
+    "question": "해외 출장 갔을 때 돈 어떻게 받아?"
+})
+
+print(response.content)
+##
+#step5_optimize_response.py
+##
+# 1. Temperature를 0으로 설정 (환각 최소화)
+llm = ChatOpenAI(model="gpt-4o", temperature=0)
+
+# 2. 강력한 제약 조건이 포함된 프롬프트
+strict_prompt = PromptTemplate.from_template(
+    """당신은 사내 규정 안내 챗봇입니다. 반드시 아래 [검색된 문서]만 참고하세요. 
+    문서에 정답이 없다면 절대 지어내지 말고 "문서에서 찾을 수 없습니다"라고 답하세요. 
+    답변은 불릿 포인트(•)로 3줄 이내로 요약하세요. 
+    [검색된 문서] {context} 
+    [사용자 질문] {question}"""
+)
+
+# 3. 문서에 없는 질문 테스트
+chain = strict_prompt | llm 
+response = chain.invoke({ 
+    "context": docs[0].page_content, 
+    "question": "우리 회사 대표이사 이름이 뭐야?" 
+})
+print(response.content)
+
+##
+app_chat_ui.py
+
+##
+import streamlit as st
+# 1. 대화 기록 저장소 초기화
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# 2. 이전 대화 내역 화면에 출력
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# 3. 사용자 입력창 생성
+if prompt := st.chat_input("질문을 입력하세요..."):
+    # 사용자가 입력한 질문 화면에 띄우기
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    
+    # 4. AI 답변 생성 및 화면에 띄우기
+    with st.chat_message("assistant"):
+        # (실제로는 여기에 RAG 코드가 들어갑니다)
+        response = "AI의 답변입니다."
+        st.markdown(response)
+    st.session_state.messages.append({"role": "assistant", "content": response})
+
+##
+step6_file_upload.py
+
+##
+# 1. Streamlit 라이브러리 불러오기
+import streamlit as st
+
+# 메인 화면 제목 설정
+st.title("사내 규정 챗봇 🤖")
+
+# 2 & 3. 사이드바에 파일 업로드 위젯 추가
+# type=["pdf"] 로 설정하여 PDF 파일만 받도록 제한
+with st.sidebar:
+    st.header("설정")
+    uploaded_file = st.file_uploader("PDF 문서를 업로드하세요", type=["pdf"])
+
+# 4. 파일 업로드 상태 확인
+if uploaded_file is not None:
+    st.success("파일이 성공적으로 업로드되었습니다!")
+else:
+    st.info("먼저 좌측에서 PDF 파일을 업로드해주세요.")
+
+##
+app.py (핵심)
+
+##
+# 1. UI 구성 (Streamlit)
+import streamlit as st
+
+st.title("사내 규정 AI 챗봇")
+
+# 2. 파일 업로드 처리
+uploaded_file = st.sidebar.file_uploader("PDF 업로드")
+
+# 3. RAG 파이프라인 실행 (파일이 있을 때만)
+if uploaded_file:
+    # 문서 로드 -> 청킹 -> 임베딩 -> 벡터 DB 저장
+    vector_db = process_document(uploaded_file)
+
+# 4. 사용자 질문 입력 및 답변 생성
+user_query = st.chat_input("질문을 입력하세요")
+
+if user_query:
+    answer = generate_answer(vector_db, user_query)
+    st.write(answer)
+
+
+##################
+close 모델이 아닌 open 모델 쓰는 경우
+##
+google/gemma-4-31B-it
