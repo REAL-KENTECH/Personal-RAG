@@ -36,9 +36,34 @@ import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from personal_rag.auth.prefs import _load_user_prefs, _save_user_prefs
+from personal_rag.auth.supabase_io import (
+    _scrub_for_postgres,
+    _supabase_client,
+    _supabase_insert,
+    _supabase_login,
+    _supabase_save_prefs,
+    _supabase_signup,
+    _supabase_users_enabled,
+)
+from personal_rag.auth.users import (
+    USERS_FROM_SECRETS,
+    _agent_log_path,
+    _auth_gate,
+    _events_log_path,
+    _is_streamlit_cloud,
+    _log_event,
+    _safe_uid,
+    _user_data_dir,
+    _user_logs_dir,
+    _user_sessions_dir,
+)
+from personal_rag.branding import FAVICON, LOGO_URI
 from personal_rag.config import (
     APP_CSS,
+    DATA_DIR,
     EMBEDDER_CHOICES,
+    LOGS_DIR,
     PROVIDER_MODELS,
     PROVIDER_NAMES,
     PROVIDERS,
@@ -62,32 +87,9 @@ try:
 except Exception:
     pass
 
-LOGO_PATH = Path(__file__).parent / 'logo' / 'real_logo.png'           # full lockup
-FAVICON_PATH = Path(__file__).parent / 'logo' / 'real_1_엠블럼.png'    # square emblem for browser tab
-
-
-def _b64(path: Path) -> str:
-    if not path.exists():
-        return ''
-    try:
-        return base64.b64encode(path.read_bytes()).decode('ascii')
-    except Exception:
-        return ''
-
-
-_LOGO_B64 = _b64(LOGO_PATH)
-_LOGO_URI = f'data:image/png;base64,{_LOGO_B64}' if _LOGO_B64 else ''
-
-
-# Favicon needs a square-ish source so the tab icon is recognizable.
-_FAVICON = str(FAVICON_PATH) if FAVICON_PATH.exists() else (
-    str(LOGO_PATH) if LOGO_PATH.exists() else None
-)
-
-
 st.set_page_config(
     page_title='Personal RAG',
-    page_icon=_FAVICON,
+    page_icon=FAVICON,
     layout='wide',
     initial_sidebar_state='expanded',
 )
@@ -98,267 +100,16 @@ st.set_page_config(
 # responsive behavior and the sidebar can be collapsed/reopened normally.
 st.markdown(APP_CSS, unsafe_allow_html=True)
 
-DATA_DIR = Path(__file__).parent / '.data'
+# Ensure the on-disk roots exist before any view tries to write to them.
+# DATA_DIR / LOGS_DIR are declared as Path constants in personal_rag/config.py.
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-LOGS_DIR = Path(__file__).parent / 'logs'
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ---------- Multi-user isolation ----------
-# Each user gets their own subtree under DATA_DIR and LOGS_DIR so uploaded
-# documents, indexes, conversation history, and agent runs do not leak between
-# users sharing this deployment. If no users are configured in secrets, the
-# app falls back to a single '_local' user (suitable for local dev).
-
-USERS_FROM_SECRETS = {}
-try:
-    USERS_FROM_SECRETS = dict(st.secrets.get('users', {}) or {})
-except Exception:
-    USERS_FROM_SECRETS = {}
-
-
-def _safe_uid(uid: str) -> str:
-    return re.sub(r'[^A-Za-z0-9._-]+', '_', uid or '_local') or '_local'
-
-
-def _user_data_dir() -> Path:
-    d = DATA_DIR / _safe_uid(st.session_state.get('user_id', '_local'))
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _user_sessions_dir() -> Path:
-    d = _user_data_dir() / 'sessions'
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _user_logs_dir() -> Path:
-    d = LOGS_DIR / _safe_uid(st.session_state.get('user_id', '_local'))
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _agent_log_path() -> Path:
-    return _user_logs_dir() / 'agents.jsonl'
-
-
-def _events_log_path() -> Path:
-    return _user_logs_dir() / 'events.jsonl'
-
-
-# ---------- Persistent Supabase logging ----------
-# Streamlit Community Cloud's filesystem is ephemeral — every redeploy or
-# container restart wipes /mount/src/.../logs. To preserve user activity for
-# real analysis and audit, every log function ALSO inserts into Supabase
-# Postgres when SUPABASE_URL + SUPABASE_KEY are configured (via .env or
-# Streamlit secrets). If neither is set, only the local JSONL is written and
-# the function is a no-op. Tables expected (one-time setup via SQL editor):
-#   chat_turns, agent_runs, events  — schema in db_schema.sql.
-
-@st.cache_resource(show_spinner=False)
-def _supabase_client():
-    """Return a Supabase client if configured, else None. Cached so we don't
-    re-import / re-connect on every turn."""
-    url = os.getenv('SUPABASE_URL', '').strip()
-    key = os.getenv('SUPABASE_KEY', '').strip() or os.getenv('SUPABASE_SERVICE_KEY', '').strip()
-    if not url or not key:
-        return None
-    try:
-        from supabase import create_client
-        return create_client(url, key)
-    except Exception:
-        return None
-
-
-def _scrub_for_postgres(obj):
-    """Recursively strip control characters Postgres can't store.
-
-    PDF text extraction routinely embeds NULL bytes (\\x00) into chunk text.
-    Postgres rejects them in TEXT and JSONB columns with code 22P05. We
-    also drop other ASCII control chars (except tab/newline/cr) since they
-    contribute nothing for log analysis and trip JSON validators in some
-    Postgres setups."""
-    if isinstance(obj, str):
-        if '\x00' not in obj and not any(
-            ord(c) < 32 and c not in '\t\n\r' for c in obj[:1024]
-        ):
-            return obj  # fast path — clean string
-        return ''.join(
-            c for c in obj if ord(c) >= 32 or c in '\t\n\r'
-        ).replace('\x00', '')
-    if isinstance(obj, dict):
-        return {k: _scrub_for_postgres(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_scrub_for_postgres(x) for x in obj]
-    return obj
-
-
-# ---------- Supabase-backed user auth (signup/login) ----------
-# The actual passwords never reach Python. We call two SECURITY DEFINER
-# RPCs in Postgres that handle bcrypt hashing/verification, and only see
-# (success, message, user_id) back. Configure via db_schema_users.sql.
-
-def _supabase_signup(username: str, password: str) -> tuple:
-    """Returns (success: bool, message: str). Requires Supabase configured
-    and db_schema_users.sql applied."""
-    client = _supabase_client()
-    if client is None:
-        return False, 'Supabase 가 설정되지 않아 회원가입을 사용할 수 없습니다.'
-    try:
-        resp = client.rpc(
-            'signup_user',
-            {'p_username': username, 'p_password': password},
-        ).execute()
-        rows = resp.data or []
-        if not rows:
-            return False, '회원가입 처리 중 알 수 없는 오류가 발생했습니다.'
-        row = rows[0]
-        return bool(row.get('success')), str(row.get('message') or '')
-    except Exception as e:
-        msg = str(e)
-        if 'function' in msg.lower() and 'does not exist' in msg.lower():
-            return False, (
-                '회원가입 시스템이 아직 설정되지 않았습니다. '
-                'Supabase SQL Editor 에서 db_schema_users.sql 을 실행하세요.'
-            )
-        return False, f'회원가입 실패: {msg[:200]}'
-
-
-def _supabase_login(username: str, password: str) -> tuple:
-    """Returns (success: bool, message: str, user_id_in_db: int|None)."""
-    client = _supabase_client()
-    if client is None:
-        return False, 'Supabase 미설정.', None
-    try:
-        resp = client.rpc(
-            'login_user',
-            {'p_username': username, 'p_password': password},
-        ).execute()
-        rows = resp.data or []
-        if not rows:
-            return False, '로그인 처리 중 알 수 없는 오류.', None
-        row = rows[0]
-        return (
-            bool(row.get('success')),
-            str(row.get('message') or ''),
-            row.get('user_id'),
-        )
-    except Exception as e:
-        msg = str(e)
-        if 'function' in msg.lower() and 'does not exist' in msg.lower():
-            return False, (
-                '로그인 시스템이 아직 설정되지 않았습니다. '
-                'Supabase SQL Editor 에서 db_schema_users.sql 을 실행하세요.'
-            ), None
-        return False, f'로그인 실패: {msg[:200]}', None
-
-
-def _supabase_users_enabled() -> bool:
-    """True if Supabase is configured. We assume db_schema_users.sql has
-    been applied; the RPC helpers handle the "function missing" case with
-    a friendly message instead of crashing."""
-    return _supabase_client() is not None
-
-
-def _should_sync_prefs_to_supabase() -> bool:
-    """Sync prefs to Supabase only when a user has a stable identity. Anon
-    UUIDs change each visit so syncing them wastes DB writes for no
-    benefit; logged-in usernames and the local-dev `_local` slot are fine."""
-    client = _supabase_client()
-    if client is None:
-        return False
-    uid = st.session_state.get('user_id', '')
-    if not uid or uid.startswith('_anon_'):
-        return False
-    return True
-
-
-def _supabase_load_prefs() -> dict:
-    """Return this user's prefs blob from Supabase, or {} if none / error.
-    Designed to extend (not replace) whatever the disk file already gave us:
-    callers should merge with disk dict, Supabase wins on conflicts."""
-    if not _should_sync_prefs_to_supabase():
-        return {}
-    client = _supabase_client()
-    uid = st.session_state['user_id']
-    try:
-        resp = client.rpc('get_prefs', {'p_user_id': uid}).execute()
-        # rpc on a scalar-returning function gives us the value directly
-        data = resp.data
-        if isinstance(data, dict):
-            return data
-        if isinstance(data, str) and data:
-            try:
-                return json.loads(data)
-            except Exception:
-                return {}
-        return {}
-    except Exception:
-        return {}
-
-
-def _supabase_save_prefs(prefs: dict) -> None:
-    """Upsert prefs blob. Best-effort; failures don't break the local save."""
-    if not _should_sync_prefs_to_supabase():
-        return
-    client = _supabase_client()
-    uid = st.session_state['user_id']
-    try:
-        client.rpc(
-            'set_prefs',
-            {'p_user_id': uid, 'p_prefs': _scrub_for_postgres(prefs)},
-        ).execute()
-    except Exception as e:
-        # Don't loop noise — record once per session.
-        if not st.session_state.get('_prefs_sync_warned'):
-            st.session_state['_prefs_sync_warned'] = True
-            st.session_state['_prefs_sync_last_err'] = (
-                f'{type(e).__name__}: {str(e)[:300]}'
-            )
-
-
-def _supabase_insert(table: str, record: dict) -> None:
-    """Best-effort INSERT. Never raises — local JSONL remains the source of
-    truth for the live container; Supabase is the durable copy. Failures are
-    tracked in session_state so the cache tab can surface them instead of
-    leaving the user wondering why rows aren't appearing."""
-    client = _supabase_client()
-    if client is None:
-        return
-    st.session_state['_sb_attempts'] = st.session_state.get('_sb_attempts', 0) + 1
-    try:
-        client.table(table).insert(_scrub_for_postgres(record)).execute()
-        st.session_state['_sb_successes'] = st.session_state.get('_sb_successes', 0) + 1
-    except Exception as e:
-        st.session_state['_sb_failures'] = st.session_state.get('_sb_failures', 0) + 1
-        st.session_state['_sb_last_err'] = f'{table}: {type(e).__name__}: {str(e)[:600]}'
-
-
-def _log_event(event_type: str, payload: dict = None) -> None:
-    """Append one event to ./logs/{user_id}/events.jsonl.
-
-    Captures everything outside the chat/agent JSONL: login, logout, document
-    ingest, document delete, session delete, LLM call failures. One line per
-    event so it merges cleanly with the other JSONL files for analytics.
-    Best-effort — failures swallowed so logging never breaks the user flow.
-    """
-    record = {
-        'kind': 'event',
-        'event_type': event_type,
-        'timestamp': datetime.datetime.now().isoformat(timespec='microseconds'),
-        'user_id': st.session_state.get('user_id', '_local'),
-        'payload': payload or {},
-    }
-    try:
-        with _events_log_path().open('a', encoding='utf-8') as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
-    except Exception:
-        pass
-    _supabase_insert('events', record)
-
-# Provider catalog, model lists, embedder/reranker IDs are imported from
-# personal_rag/config.py — keep changes to those tables in that single place.
+# Per-user filesystem layout, Supabase RPCs, event logging, and the login
+# gate live in personal_rag/auth/. Provider/model/embedder catalogs live in
+# personal_rag/config.py. The imports above re-expose those names locally so
+# existing call sites further down this file still resolve.
 
 
 # =============================================================================
@@ -370,340 +121,11 @@ def _log_event(event_type: str, payload: dict = None) -> None:
 _init_state()
 
 
-# ---------- Login gate ----------
-
-def _render_login_screen():
-    """Render brand + login form. Sets user_id on success and reruns; otherwise
-    st.stop()s so the rest of the app is gated off.
-
-    Also renders a minimal sidebar (brand only) so the page does not look like
-    the sidebar disappeared — it just has no nav until login completes.
-    """
-    with st.sidebar:
-        if _LOGO_URI:
-            st.markdown(
-                f'<div style="text-align:center; padding:4px 0 4px 0;">'
-                f'<img src="{_LOGO_URI}" '
-                f'style="width:100%; max-width:220px; height:auto; display:block; margin:0 auto;" />'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-        st.markdown(
-            '<div class="sb-brand" style="text-align:center; font-size:14px;">Personal RAG</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<div class="sb-tagline" style="text-align:center;">로그인 후 이용</div>',
-            unsafe_allow_html=True,
-        )
-
-    if _LOGO_URI:
-        st.markdown(
-            f'<div style="text-align:center; margin-top:80px; margin-bottom:8px;">'
-            f'<img src="{_LOGO_URI}" '
-            f'style="max-width:240px; height:auto; opacity:0.95;" /></div>',
-            unsafe_allow_html=True,
-        )
-
-    # Two distinct login backends:
-    #  1) Supabase users table (signup + login, bcrypt). Active when Supabase
-    #     is configured. New users can register themselves.
-    #  2) Legacy secrets [users] block. Admin-managed; no signup.
-    use_supabase_auth = _supabase_users_enabled()
-
-    if use_supabase_auth:
-        st.markdown(
-            '<div style="text-align:center; font-size:14px; color:rgba(128,128,128,0.9); '
-            'margin-bottom:16px;">계정으로 로그인하거나 새로 가입하세요.</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div style="text-align:center; font-size:14px; color:rgba(128,128,128,0.9); '
-            'margin-bottom:24px;">로그인이 필요합니다.</div>',
-            unsafe_allow_html=True,
-        )
-
-    _, form_col, _ = st.columns([1, 2, 1])
-    with form_col:
-        if use_supabase_auth:
-            tab_login, tab_signup = st.tabs(['로그인', '회원가입'])
-            with tab_login:
-                with st.form('_login_form', clear_on_submit=False):
-                    username = st.text_input(
-                        '아이디', key='login_username',
-                        placeholder='가입한 아이디',
-                    )
-                    password = st.text_input(
-                        '비밀번호', type='password', key='login_password',
-                        placeholder='비밀번호 입력',
-                    )
-                    submitted = st.form_submit_button(
-                        '로그인', use_container_width=True, type='primary',
-                    )
-                if submitted:
-                    ok, msg, _user_id = _supabase_login(username, password)
-                    if ok:
-                        st.session_state['user_id'] = (username or '').strip()
-                        st.session_state['_loaded_for_embedder'] = None
-                        _log_event('login', {
-                            'method': 'supabase',
-                            'username': st.session_state['user_id'],
-                        })
-                        st.rerun()
-                    else:
-                        _log_event('login_failed', {
-                            'method': 'supabase',
-                            'attempted_username': (username or '')[:64],
-                            'reason': msg[:200],
-                        })
-                        st.error(msg)
-            with tab_signup:
-                with st.form('_signup_form', clear_on_submit=False):
-                    new_username = st.text_input(
-                        '새 아이디',
-                        key='signup_username',
-                        placeholder='2자 이상 64자 이하',
-                    )
-                    new_password = st.text_input(
-                        '새 비밀번호', type='password',
-                        key='signup_password',
-                        placeholder='6자 이상 입력',
-                    )
-                    new_password2 = st.text_input(
-                        '비밀번호 확인', type='password',
-                        key='signup_password2',
-                        placeholder='위와 동일하게 한 번 더',
-                    )
-                    signup_submitted = st.form_submit_button(
-                        '회원가입', use_container_width=True, type='primary',
-                    )
-                if signup_submitted:
-                    if new_password != new_password2:
-                        st.error('비밀번호 확인이 일치하지 않습니다.')
-                    else:
-                        ok, msg = _supabase_signup(new_username, new_password)
-                        if ok:
-                            # Auto-login after signup so user doesn't have to
-                            # retype credentials.
-                            ok2, _msg2, _uid = _supabase_login(
-                                new_username, new_password,
-                            )
-                            if ok2:
-                                st.session_state['user_id'] = (
-                                    (new_username or '').strip()
-                                )
-                                st.session_state['_loaded_for_embedder'] = None
-                                _log_event('signup', {
-                                    'username': st.session_state['user_id'],
-                                })
-                                _log_event('login', {
-                                    'method': 'supabase',
-                                    'username': st.session_state['user_id'],
-                                    'first_login': True,
-                                })
-                                st.success('회원가입 완료 — 자동 로그인했습니다.')
-                                st.rerun()
-                            else:
-                                st.success('회원가입 성공. 로그인 탭에서 다시 로그인해 주세요.')
-                        else:
-                            st.error(msg)
-        else:
-            with st.form('_login_form', clear_on_submit=False):
-                username = st.text_input('사용자 ID')
-                password = st.text_input('비밀번호', type='password')
-                submitted = st.form_submit_button(
-                    '로그인', use_container_width=True, type='primary',
-                )
-            if submitted:
-                if (username in USERS_FROM_SECRETS
-                        and str(USERS_FROM_SECRETS[username]) == str(password)):
-                    st.session_state['user_id'] = username
-                    st.session_state['_loaded_for_embedder'] = None
-                    _log_event('login', {'method': 'password', 'username': username})
-                    st.rerun()
-                else:
-                    _log_event('login_failed', {
-                        'method': 'password',
-                        'attempted_username': (username or '')[:64],
-                    })
-                    st.error('사용자 ID 또는 비밀번호가 올바르지 않습니다.')
-    st.stop()
-
-
-def _is_streamlit_cloud() -> bool:
-    """Detect Streamlit Community Cloud — apps are mounted under /mount/src/."""
-    return Path('/mount/src').exists()
-
-
-def _auth_gate():
-    """Resolve the active user_id. Priority:
-      1) Supabase users (signup + login, bcrypt) — when Supabase is wired up.
-         This is the recommended setup for any shared deployment.
-      2) Legacy secrets [users] block — admin-managed, no signup.
-      3) Streamlit Cloud, no auth backend at all → anonymous per-browser UUID.
-      4) Local dev, no auth backend → single-tenant '_local'.
-    """
-    current_uid = st.session_state.get('user_id', '')
-
-    # Migration: if an auth backend was just enabled but the browser still has
-    # a stale anonymous user_id from before the backend existed, drop it so
-    # the login screen actually appears. Otherwise the gate keeps short-
-    # circuiting on the old anon id and the user never sees a login form.
-    if current_uid.startswith('_anon_') and (
-            _supabase_users_enabled() or USERS_FROM_SECRETS):
-        st.session_state['user_id'] = ''
-        current_uid = ''
-
-    if current_uid:
-        return  # already logged in (real account or anon/local fallback)
-
-    if _supabase_users_enabled():
-        _render_login_screen()
-        return
-
-    if USERS_FROM_SECRETS:
-        _render_login_screen()
-        return
-
-    if _is_streamlit_cloud():
-        # New visitor on a shared deployment without auth → give them their
-        # own isolated workspace for this browser session. Closing the tab
-        # ends the session; previous anonymous data remains on disk under
-        # its UUID until an admin cleans it up.
-        st.session_state['user_id'] = '_anon_' + uuid.uuid4().hex[:10]
-        _log_event('login', {'method': 'anonymous'})
-    else:
-        st.session_state['user_id'] = '_local'
-        if not st.session_state.get('_local_login_logged'):
-            _log_event('login', {'method': 'local'})
-            st.session_state['_local_login_logged'] = True
-
-
+# ---------- Boot sequence ----------
+# The login gate must resolve a user_id BEFORE prefs load, because prefs are
+# read from per-user paths under DATA_DIR/<user_id>/. Both live in
+# personal_rag/auth/ and only the call sites remain here.
 _auth_gate()
-
-
-# ---------- Persisted per-user preferences (survives idle reset) ----------
-# Streamlit Cloud disconnects idle WebSocket sessions, and reconnection
-# resets st.session_state. We persist the slowly-changing config (API keys,
-# provider, model, retrieval/sampling settings, active view) to disk so the
-# user does not lose them when they come back after stepping away. Conversation
-# history is already persisted via the session JSONL files.
-
-_PERSIST_KEYS = (
-    'provider', 'model', 'base_url',
-    'hf_api_key', 'openai_api_key', 'anthropic_api_key', 'fireworks_api_key',
-    'dashscope_api_key', 'custom_api_key',
-    'tavily_key', 'brave_key',
-    'embedder_model', 'chunk_size', 'chunk_overlap',
-    'retrieval_mode', 'retrieve_top_n', 'final_top_k', 'use_reranker',
-    'use_pgvector_search', 'use_agentic_search', 'agentic_max_iters',
-    'general_chat_mode',
-    'use_contextual_rewrite', 'use_multi_query', 'use_hyde', 'n_paraphrases',
-    'per_doc_balance', 'per_doc_reserve', 'comparison_autodetect',
-    'include_page_images', 'max_page_images',
-    'web_enabled', 'web_provider', 'web_top_n',
-    'max_tokens', 'temperature', 'top_p', 'sampling_top_k',
-    'presence_penalty', 'stream', 'enable_thinking',
-    'chat_doc_filter', 'active_view',
-    # Active conversation pointer — combined with auto-restore in view_chat
-    # this lets the user pick up exactly where they were after a Cloud
-    # idle reset, not just "new chat on the chat tab".
-    'current_session_id',
-)
-
-
-def _user_prefs_path() -> Path:
-    return _user_data_dir() / 'preferences.json'
-
-
-def _load_user_prefs():
-    """Override session_state defaults with whatever was last saved for this
-    user. Tries disk first (fast, available locally), then merges in
-    Supabase prefs (survives Cloud container restarts and follows the user
-    across devices). Supabase values win on conflict — they are the
-    authoritative source for logged-in users.
-
-    Crucial: this must run only ONCE per Streamlit session. Otherwise every
-    rerun (e.g. when a sidebar button sets active_view='settings') would
-    immediately overwrite the just-clicked value with the previously-saved
-    disk value, making the UI feel unresponsive.
-
-    After an idle reconnect, session_state is wiped → the _prefs_loaded flag
-    is gone → this function runs again and restores the user's last state.
-    """
-    if st.session_state.get('_prefs_loaded'):
-        return
-
-    data = {}
-
-    # Disk first — present on warm Cloud container or local dev.
-    p = _user_prefs_path()
-    if p.exists():
-        try:
-            data = json.loads(p.read_text())
-        except Exception:
-            data = {}
-
-    # Supabase next — wins on conflict so cross-device sync works.
-    sb_prefs = _supabase_load_prefs()
-    if isinstance(sb_prefs, dict) and sb_prefs:
-        data.update(sb_prefs)
-
-    for k in _PERSIST_KEYS:
-        if k not in data:
-            continue
-        v = data[k]
-        if v is None:
-            continue
-        if isinstance(v, str) and not v:
-            # Don't clobber an env-loaded key with an empty saved string.
-            continue
-        st.session_state[k] = v
-    # Fallback: deprecated models (Responses-only / Korean-native not on
-    # HF Inference Providers) should be swapped before any API call. We
-    # only have the swap table after PROVIDERS is defined further down the
-    # file, so just check by name here — the table itself is referenced at
-    # call time by _resolve_deprecated_model(). This pass handles "user's
-    # picker still shows the bad name" on session start.
-    _DEPRECATED_NOW = {
-        'gpt-5-pro', 'o1-pro', 'gpt-5.5-pro', 'gpt-5.4-pro',
-        'LGAI-EXAONE/EXAONE-4.5-33B',
-        'naver-hyperclovax/HyperCLOVAX-SEED-Think-32B',
-    }
-    if st.session_state.get('model') in _DEPRECATED_NOW:
-        # If we know the provider, swap to its default; otherwise leave a
-        # neutral safe choice. The call-time guard handles the rest.
-        prov = st.session_state.get('provider', '')
-        if prov == 'OpenAI':
-            st.session_state['model'] = 'gpt-5-mini'
-        elif prov == 'Hugging Face Router':
-            st.session_state['model'] = 'Qwen/Qwen3-Next-80B-A3B-Instruct'
-        else:
-            st.session_state['model'] = 'Qwen/Qwen3-Next-80B-A3B-Instruct'
-    st.session_state['_prefs_loaded'] = True
-
-
-def _save_user_prefs():
-    """Persist current configurable session_state. Writes to local disk
-    (fast, works offline) AND to Supabase user_preferences (survives
-    container restarts, follows the user across devices). Each side is
-    best-effort; if one fails the other still happened."""
-    data = {k: st.session_state.get(k) for k in _PERSIST_KEYS}
-    try:
-        encoded = json.dumps(data, ensure_ascii=False, default=str, sort_keys=True)
-    except Exception:
-        return
-    if st.session_state.get('_prefs_snapshot') == encoded:
-        return
-    try:
-        _user_prefs_path().write_text(encoded)
-    except Exception:
-        pass
-    _supabase_save_prefs(data)
-    st.session_state['_prefs_snapshot'] = encoded
-
-
 _load_user_prefs()
 
 
@@ -3923,10 +3345,10 @@ NAV = [
 NAV_KEYS = [k for k, _ in NAV]
 
 with st.sidebar:
-    if _LOGO_URI:
+    if LOGO_URI:
         st.markdown(
             f'<div style="text-align:center; padding:4px 0 4px 0;">'
-            f'<img src="{_LOGO_URI}" '
+            f'<img src="{LOGO_URI}" '
             f'style="width:100%; max-width:220px; height:auto; display:block; margin:0 auto;" />'
             f'</div>'
             f'<div style="text-align:center; margin-bottom:8px;">'
@@ -4221,10 +3643,10 @@ def view_chat():
     elif not st.session_state['generated_responses']:
         # Hero with full brand lockup + suggestion chips.
         logo_html = (
-            f'<img src="{_LOGO_URI}" '
+            f'<img src="{LOGO_URI}" '
             f'style="width:100%; max-width:340px; height:auto; '
             f'margin:0 auto 18px auto; display:block; opacity:0.95;" />'
-            if _LOGO_URI else ''
+            if LOGO_URI else ''
         )
         st.markdown(
             f'<div class="empty-hero">'
@@ -5608,10 +5030,10 @@ def view_agents():
 # =============================================================================
 
 def view_about():
-    if _LOGO_URI:
+    if LOGO_URI:
         st.markdown(
             f'<div style="text-align:center; margin-bottom:18px;">'
-            f'<img src="{_LOGO_URI}" '
+            f'<img src="{LOGO_URI}" '
             f'style="width:100%; max-width:280px; height:auto; display:block; margin:0 auto 8px auto;" />'
             f'<div style="font-size:22px; font-weight:700; letter-spacing:-0.01em;">Personal RAG</div>'
             f'<div style="font-size:13px; color:rgba(128,128,128,0.95);">내 문서 기반 질의응답 시스템</div>'

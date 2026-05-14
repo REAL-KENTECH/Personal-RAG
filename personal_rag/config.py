@@ -5,6 +5,23 @@ no environment lookups. Anything with a side effect (page config, directory
 creation, dotenv loading) stays in app.py so import order remains explicit.
 """
 
+from pathlib import Path
+
+
+# -----------------------------------------------------------------------------
+# Filesystem paths derived from the repository root
+# -----------------------------------------------------------------------------
+# personal_rag/config.py lives one level under the repo root, so .parent.parent
+# resolves to the project directory. These are Path objects only — the actual
+# mkdir() happens once at app.py boot so import-time side effects stay
+# concentrated in the entry point.
+
+_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = _ROOT / '.data'
+LOGS_DIR = _ROOT / 'logs'
+LOGO_PATH = _ROOT / 'logo' / 'real_logo.png'           # full lockup
+FAVICON_PATH = _ROOT / 'logo' / 'real_1_엠블럼.png'    # square emblem for browser tab
+
 
 # -----------------------------------------------------------------------------
 # Embedding / reranker model IDs
