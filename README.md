@@ -273,6 +273,21 @@ logs/{user_id}/events.jsonl                   # 로그인/문서/세션/LLM 에�
 3. Cloud + 둘 다 없음 → 브라우저별 익명 UUID
 4. 로컬 → `_local` 단일 사용자
 
+## 테스트
+
+순수 함수 위주의 빠른 회귀 테스트 (전체 0.8초 이내):
+
+```bash
+pip install -r requirements-dev.txt
+pytest                                # 전체
+pytest tests/test_chunking.py -v      # 한 파일만
+pytest -k "citation" -v               # 이름 매칭
+```
+
+77개 테스트 — 청킹 (한국어 종결어 포함), citation 파싱, BM25 토크나이저, RRF 융합, per-doc 균형, 모델 family 판별, agent 템플릿 5종 + AGENT_TASKS 레지스트리 계약.
+
+Streamlit-결합 함수(`stream_chat`, `retrieve_local`, `handle_chat_turn` 등)는 실행 중인 앱에서 수동 검증 — `streamlit run app.py`로 브라우저에서 확인.
+
 ## 시스템 데몬 등록 (선택)
 
 상시 백그라운드 실행 / 부팅 시 자동 시작:
